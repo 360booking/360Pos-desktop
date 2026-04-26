@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Server,
   Database,
@@ -12,10 +13,15 @@ import {
   CloudDownload,
   LifeBuoy,
   Settings,
+  LogOut,
+  User as UserIcon,
 } from 'lucide-react';
 import { useDeviceStatus, type StatusLevel } from '@/store/deviceStatus';
 import { useCatalog } from '@/store/catalog';
 import { useRecovery } from '@/store/recovery';
+import { useAuthStore } from '@/store/auth';
+import { logout as logoutApi } from '@/lib/api/auth';
+import { stopSyncEngine } from '@/lib/sync/bootstrap';
 
 /** A bootstrap older than this counts as stale — yellow dot. The
  * scheduler ticks every 30 minutes (BOOTSTRAP_REFRESH_MS) so we give it
@@ -84,6 +90,25 @@ export function StatusBar({ onOpenRecovery, onOpenDiagnostics }: StatusBarProps 
   const lastBootstrapAt = useCatalog((c) => c.lastSuccessfulAt);
   const recoveryCount = useRecovery((r) => r.rows.length);
   const bs = bootstrapStatus(lastBootstrapAt);
+  const userName = useAuthStore((a) => a.user?.displayName ?? a.user?.email ?? null);
+  const restaurantName = useAuthStore((a) => a.selectedRestaurant?.name ?? null);
+  const refreshToken = useAuthStore((a) => a.refreshToken);
+  const clearAuth = useAuthStore((a) => a.clear);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function onLogout() {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setMenuOpen(false);
+    try {
+      await logoutApi(refreshToken);
+    } finally {
+      stopSyncEngine();
+      await clearAuth();
+      setLoggingOut(false);
+    }
+  }
   return (
     <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-white/10 bg-slate-950/60 backdrop-blur">
       <div className="flex items-center gap-2 overflow-x-auto">
@@ -161,6 +186,44 @@ export function StatusBar({ onOpenRecovery, onOpenDiagnostics }: StatusBarProps 
           {s.online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
           {s.online ? 'Online' : 'Offline'}
         </span>
+        {userName ? (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-slate-200 border border-white/10 bg-slate-950/40 hover:bg-slate-700/40"
+              title={`Logat: ${userName}${restaurantName ? ` · ${restaurantName}` : ''}`}
+            >
+              <UserIcon className="h-3 w-3 text-violet-300" />
+              <span className="max-w-[120px] truncate">{userName}</span>
+              {restaurantName ? (
+                <span className="hidden sm:inline text-slate-400">· {restaurantName}</span>
+              ) : null}
+            </button>
+            {menuOpen ? (
+              <div className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-white/10 bg-slate-950/95 text-sm shadow-xl backdrop-blur">
+                <div className="px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-slate-500">
+                  Sesiune
+                </div>
+                <div className="border-t border-white/5 px-3 py-2">
+                  <p className="truncate text-slate-200">{userName}</p>
+                  {restaurantName ? (
+                    <p className="truncate text-xs text-slate-400">{restaurantName}</p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  disabled={loggingOut}
+                  className="flex w-full items-center gap-2 border-t border-white/5 px-3 py-2 text-left text-rose-300 hover:bg-rose-500/10 disabled:opacity-60"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  {loggingOut ? 'Logout...' : 'Logout'}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -13,6 +13,7 @@ import { useDeviceStatus } from '@/store/deviceStatus';
 import { useCatalog } from '@/store/catalog';
 import { useRecovery } from '@/store/recovery';
 import { useRemote } from '@/store/remote';
+import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
 
 export interface DiagnosticsSnapshot {
@@ -29,6 +30,24 @@ export interface DiagnosticsSnapshot {
   // ─── User (from bootstrap snapshot) ───────────────────────────────
   userRole: string | null;
   userName: string | null;
+
+  // ─── Auth state (Sprint 10) ───────────────────────────────────────
+  /** 'booting' | 'unauthenticated' | 'authenticated'. */
+  authStatus: string;
+  /** Email of the logged-in user, never the token. */
+  authUserEmail: string | null;
+  /** Slug of the active tenant. */
+  authTenantSlug: string | null;
+  /** Name of the restaurant picked after login. */
+  authRestaurantName: string | null;
+  /** 'present' | 'expired' | 'missing' — never the token value. */
+  accessTokenStatus: 'present' | 'expired' | 'missing';
+  /** Seconds until access token expiry; negative if past. null if missing. */
+  accessTokenSecondsToExpiry: number | null;
+  /** 'present' | 'missing' — never the token value. */
+  refreshTokenStatus: 'present' | 'missing';
+  /** Whether refresh token is persisted to disk (stay-logged-in). */
+  refreshTokenPersisted: boolean;
 
   // ─── Local DB ─────────────────────────────────────────────────────
   /** Filename only (full path lives at %APPDATA%\360booking-pos\). */
@@ -75,6 +94,14 @@ export function snapshot(): DiagnosticsSnapshot {
     }
   }
 
+  const auth = useAuthStore.getState();
+  let accessStatus: 'present' | 'expired' | 'missing' = 'missing';
+  let secondsToExpiry: number | null = null;
+  if (auth.accessToken && auth.accessTokenExpiresAt) {
+    secondsToExpiry = Math.floor((auth.accessTokenExpiresAt - Date.now()) / 1_000);
+    accessStatus = secondsToExpiry > 0 ? 'present' : 'expired';
+  }
+
   return {
     appVersion: '0.1.0',
     buildProfile: cfg.buildProfile,
@@ -82,11 +109,20 @@ export function snapshot(): DiagnosticsSnapshot {
     simulatorMode: cfg.simulatorMode,
     backendUrl: cfg.backendUrl,
     deviceId: cfg.deviceId ?? '<unpaired>',
-    tenantId: cfg.tenantId,
-    restaurantId: cfg.restaurantId,
+    tenantId: auth.tenant?.id ?? cfg.tenantId,
+    restaurantId: auth.selectedRestaurant?.id ?? cfg.restaurantId,
 
-    userRole: cat.currentUser?.role ?? null,
-    userName: cat.currentUser?.name ?? null,
+    userRole: auth.user?.role ?? cat.currentUser?.role ?? null,
+    userName: auth.user?.displayName ?? cat.currentUser?.name ?? null,
+
+    authStatus: auth.status,
+    authUserEmail: auth.user?.email ?? null,
+    authTenantSlug: auth.tenant?.slug ?? null,
+    authRestaurantName: auth.selectedRestaurant?.name ?? null,
+    accessTokenStatus: accessStatus,
+    accessTokenSecondsToExpiry: secondsToExpiry,
+    refreshTokenStatus: auth.refreshToken ? 'present' : 'missing',
+    refreshTokenPersisted: auth.stayLoggedIn,
 
     sqliteDbName: 'pos-desktop.db',
 

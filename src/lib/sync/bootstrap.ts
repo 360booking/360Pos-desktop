@@ -54,7 +54,13 @@ function buildTransport(): SyncTransport {
   return createInMemorySyncTransport({ mode: 'success' });
 }
 
-export async function startSyncEngine(): Promise<SyncEngine | null> {
+export interface StartSyncEngineOptions {
+  /** Sprint 10: restaurant selected after login. Falls back to the
+   *  config-baked restaurantId for legacy demo builds. */
+  restaurantId?: string | null;
+}
+
+export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promise<SyncEngine | null> {
   if (_engine) return _engine;
   if (!isTauri()) return null;
 
@@ -82,12 +88,15 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
     }
   };
   const cfg = getConfig();
+  // Sprint 10: caller-supplied restaurantId (from login picker) wins over
+  // the config-baked one. Demo builds keep working when neither is set.
+  const restaurantId = opts.restaurantId ?? cfg.restaurantId;
   if (cfg.syncTransportMode === 'http') {
-    void runBootstrap({ exec, restaurantId: cfg.restaurantId }).then(broadcast);
+    void runBootstrap({ exec, restaurantId }).then(broadcast);
   }
   const bootstrapScheduler = startBootstrapScheduler({
     exec,
-    restaurantId: cfg.restaurantId,
+    restaurantId,
     isOnline: () => cfg.syncTransportMode === 'http',
     onResult: broadcast,
   });
@@ -154,4 +163,13 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
 
 export function getSyncEngine(): SyncEngine | null {
   return _engine;
+}
+
+/** Sprint 10: tear down the engine on logout so the next user gets a
+ *  fresh bootstrap + clean schedulers. */
+export function stopSyncEngine(): void {
+  if (_engine) {
+    _engine.stop();
+    _engine = null;
+  }
 }
