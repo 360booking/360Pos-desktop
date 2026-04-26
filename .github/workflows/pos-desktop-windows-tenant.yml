@@ -1,0 +1,171 @@
+name: pos-desktop-windows-tenant
+
+# Sprint 10 — Build a Windows MSI / NSIS installer wired to the live
+# backend at https://360booking.ro. The MSI starts on a LoginScreen;
+# the user authenticates with their 360booking credentials and the
+# backend returns tenant + restaurant + tables + menu.
+#
+# NO secrets are ever consumed: backend URL is public, slug + restaurant
+# id come from the login response, and tokens live only on the device.
+# Hardware adapters stay forced to simulator (simulatorMode=true) so a
+# tenant build cannot drive real Datecs / BT POS / ESC/POS even with
+# a COM port configured.
+#
+# Manually triggered (workflow_dispatch) only — pushes do NOT mint a
+# tenant MSI to avoid surprising pilots with an unannounced installer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: "Backend URL the MSI should talk to"
+        required: false
+        default: "https://360booking.ro"
+        type: string
+      release_marker:
+        description: "Optional label appended to the artifact name (e.g. 'pilot-2026-04-26')"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: pos-desktop-windows-tenant-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows tenant build
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      # Sprint 10 production-shape build:
+      POS_BUILD_PROFILE: tenant
+      VITE_SYNC_TRANSPORT_MODE: http
+      VITE_BACKEND_URL: ${{ inputs.backend_url }}
+      # Hardware safety: the adapter registry already forces simulator
+      # for every fiscal/payment/printer branch. This env mirror is
+      # belt-and-braces so the build profile cannot accidentally light
+      # up a real device on first launch.
+      POS_SIMULATOR_MODE: "true"
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        shell: pwsh
+        run: |
+          "STORE_PATH=$(pnpm store path --silent)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache cargo target (best-effort)
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: ${{ runner.os }}-cargo-target-tenant-${{ hashFiles('src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-tenant-
+
+      - name: Install JS dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path "pnpm-lock.yaml") {
+            pnpm install --frozen-lockfile
+          } else {
+            npm ci
+          }
+
+      - name: Confirm no secrets-shaped env leaked into the build
+        shell: pwsh
+        run: |
+          $env:VITE_BACKEND_URL    | Write-Host
+          $env:POS_BUILD_PROFILE   | Write-Host
+          $env:VITE_SYNC_TRANSPORT_MODE | Write-Host
+          # Fail loud if anyone smuggled a token-shaped env in.
+          $forbidden = @('VITE_TENANT_SLUG','VITE_RESTAURANT_ID','VITE_DEVICE_TOKEN','VITE_JWT','VITE_REFRESH_TOKEN')
+          foreach ($k in $forbidden) {
+            if (Test-Path "env:$k") {
+              throw "Forbidden env var present: $k"
+            }
+          }
+
+      - name: Type-check
+        shell: pwsh
+        run: npx tsc --noEmit
+
+      - name: Run unit tests
+        shell: pwsh
+        run: npx vitest run
+
+      - name: Vite production build
+        shell: pwsh
+        run: npx vite build
+
+      - name: Tauri build (MSI + NSIS, tenant profile)
+        shell: pwsh
+        run: npx @tauri-apps/cli build
+
+      - name: List build output
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Path src-tauri/target/release/bundle -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+      - name: Compose artifact name
+        id: name
+        shell: pwsh
+        run: |
+          $marker = "${{ inputs.release_marker }}".Trim()
+          if ($marker -ne "") {
+            "ARTIFACT=360booking-pos-windows-tenant-$marker" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "ARTIFACT=360booking-pos-windows-tenant" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.ARTIFACT }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe

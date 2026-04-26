@@ -214,7 +214,92 @@ What is **not** verified on Linux and must be re-checked on Windows:
 - SQLite plugin migrations against `%APPDATA%\360booking-pos\pos-desktop.db`.
 - `fiscal_bridge_status` Tauri command.
 
-## 12.55 Build the MSI in CI instead of locally
+## 12.4 Sprint 10 — login flow + tenant MSI
+
+This is now the **primary** path for a pilot install. The Sprint 9.6
+demo MSI is kept around for UI walkthroughs but it does NOT reach the
+real backend, so any pilot test against `https://360booking.ro` must use
+the tenant MSI from the workflow below.
+
+### Run the tenant workflow
+
+1. github.com → repo → **Actions** → **`pos-desktop-windows-tenant`**.
+2. **Run workflow** → branch `main` → leave inputs default
+   (`backend_url=https://360booking.ro`, `release_marker=` empty unless
+   you want to label this MSI for a specific pilot day).
+3. Wait ~10–15 min cold cache, ~5 min warm.
+4. Open the run → **Artifacts** → download
+   **`360booking-pos-windows-tenant`** (zip).
+5. Unzip → `msi/*.msi` and `nsis/*.exe` are the installers.
+
+The workflow runs the same gate as the demo build (tsc → vitest →
+vite build → tauri build) plus an explicit guard that fails the build
+if any forbidden env var is present (slug / restaurant id / device
+token / JWT / refresh token).
+
+### First-launch checklist (Sprint 10 login flow)
+
+- [ ] Installer runs without prerequisites errors. SmartScreen warning
+  is expected — click **More info** → **Run anyway**.
+- [ ] App opens on **LoginScreen** (dark gradient, branding pane on
+  desktop layouts, login form on the right).
+- [ ] Backend pill in the lower-left of the branding pane is green
+  (`online · <ms>ms`) within 3 seconds. Red here = network / TLS
+  problem. Stop and capture before continuing.
+- [ ] Login with an account that has role `super_admin`,
+  `tenant_admin`, `manager`, `waiter`, or `cashier` on a tenant that
+  owns at least one restaurant.
+- [ ] After Login button: spinner → POS shell renders. Restaurant
+  picker is auto-skipped when the user has exactly one restaurant
+  (the data model today never gives more).
+- [ ] StatusBar Bootstrap pill goes green with detail `now` within 5
+  seconds. Tables pane shows the **real** tables. Menu pane shows the
+  **real** products / categories.
+- [ ] StatusBar right side shows `<your name> · <restaurant name>` pill
+  with a Logout dropdown.
+- [ ] Diagnostics → Copy snapshot. Verify the snapshot contains
+  `authStatus="authenticated"`, `accessTokenStatus="present"`, and
+  `accessTokenSecondsToExpiry` near 900. Confirm there is NO raw token
+  string in the snapshot — only `present`/`expired`/`missing`.
+
+### Login error matrix
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Backend pill stays red | TLS / firewall / DNS | `curl https://360booking.ro/api/pos/health` from PowerShell |
+| 401 "Email sau parolă greșite" | typo / wrong env account | reset password via web admin |
+| 403 "Rolul nu are acces la POS desktop" | role `cook` or `customer` | give the user role `waiter`+ |
+| 429 "Prea multe încercări" | 5+ failed logins in 15 min | wait 15 min OR change source IP |
+| Login OK but POS shell stays empty | bootstrap failed silently | open Diagnostics, check `bootstrap` field; verify the user's tenant has a `restaurants` row |
+| StatusBar Bootstrap stays grey/red | restaurant has no products / tables | seed at least one of each in admin |
+
+### Logout + switch user
+
+StatusBar right pill → dropdown → **Logout**. The app:
+
+1. Calls `/api/pos/auth/logout` to revoke the refresh token server-side.
+2. Stops the local sync engine (`stopSyncEngine`).
+3. Wipes in-memory tokens + the persisted `auth.refresh` row in
+   pos-desktop.db.
+4. Returns to LoginScreen.
+
+The next user can log in immediately on the same machine; the
+`device-id` row stays so backend telemetry still recognises this
+installation across logouts.
+
+### Known Sprint 10 gaps (logged for Sprint 11)
+
+- Refresh token in `pos-desktop.db.settings` is **not encrypted yet**.
+  The row carries a `_do_not_share` warning string. OS keychain /
+  stronghold integration is the Sprint 11 ticket.
+- No 2FA on POS desktop login (web admin has it). Pilot users with 2FA
+  enabled must temporarily disable it for POS desktop or wait for
+  Sprint 11.
+- No "Switch restaurant" UI — relogin to switch (a single-tenant
+  install never needs it today).
+- MSI is unsigned; SmartScreen warning persists.
+
+## 12.55 Build the demo MSI in CI instead of locally
 
 If the tester does not have Rust + MSVC + WebView2 installed, the CI workflow
 at `.github/workflows/pos-desktop-windows.yml` produces the same demo MSI on a

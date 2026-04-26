@@ -50,29 +50,58 @@ The demo profile is the default — every adapter (`fiscal` / `payment` / `print
 
 ### Build via GitHub Actions (no Windows machine needed)
 
-The repo ships a `windows-latest` workflow at
-`.github/workflows/pos-desktop-windows.yml` that builds a demo / simulator-only
-MSI + NSIS and uploads them as a workflow artifact.
+There are TWO Windows workflows, both publishing the MSI as a downloadable
+artifact (no GitHub Release):
 
-How to start it:
+| Workflow | Profile | Backend | Use case |
+|---|---|---|---|
+| `pos-desktop-windows.yml` | demo | none — in-memory shim | UI walk-through, training, mock data, no real login |
+| `pos-desktop-windows-tenant.yml` | **tenant** | `https://360booking.ro` | Pilot testing — login with real 360booking creds, real tables, real menu |
+
+How to start either:
 
 1. Open the repo on github.com → **Actions** tab.
-2. Pick the **`pos-desktop-windows-demo`** workflow on the left.
+2. Pick the workflow on the left:
+   - **`pos-desktop-windows-demo`** — also runs automatically on push.
+   - **`pos-desktop-windows-tenant`** — manual only (`workflow_dispatch`).
 3. Click **Run workflow** → choose the branch → **Run workflow**.
 4. Wait for the green check (~10–15 min on a cold cache, ~5 min warm).
 5. Open the run → scroll to **Artifacts** → download
-   **`360booking-pos-windows-demo`**. The zip contains both
-   `msi/*.msi` and `nsis/*.exe`.
+   **`360booking-pos-windows-demo`** or **`360booking-pos-windows-tenant`**.
+   The zip contains both `msi/*.msi` and `nsis/*.exe`.
 
-The workflow is also triggered automatically on push to any branch when files
-outside `**/*.md` / `docs/**` change.
+**Hard limits of both CI builds** (by design):
 
-**Hard limits of the CI build** (by design):
-
-- `POS_BUILD_PROFILE=demo` and `VITE_SYNC_TRANSPORT_MODE=memory` are baked in.
-- No GitHub Secrets are consumed; nothing tenant-specific is bundled.
+- No GitHub Secrets are consumed.
+- No tenant slug, restaurant id, device token, or JWT is baked into either
+  build. The tenant build asks you to log in on first launch and learns
+  everything from the login response.
+- `simulatorMode=true` for hardware in both builds — neither MSI can drive
+  a real Datecs / BT POS / ESC/POS device, even with COM ports configured.
 - The MSI is for **pilot testing only** — never auto-published as a Release.
   Distribution of a real installer goes through the Sprint 11 signing flow.
+
+### After installing the tenant MSI — first launch
+
+1. Run the installer (right-click → "Run as administrator" if SmartScreen
+   blocks; the binary is unsigned until Sprint 11).
+2. Launch **360booking POS** from the Start Menu.
+3. The first screen is **LoginScreen** — branded, dark theme, with a
+   backend status pill. If the pill is red, the machine cannot reach
+   `https://360booking.ro` and login will fail. Fix the network first.
+4. Enter your 360booking email + password. Tick **"Ține-mă logat pe acest
+   dispozitiv"** if this is a pilot machine you don't want to log in
+   on every restart.
+5. After login the app picks your restaurant automatically (1 user → 1
+   tenant → 1 restaurant for now). If a future release supports multiple
+   restaurants per tenant, a picker is shown instead.
+6. The POS shell renders. The Bootstrap pill in the StatusBar should turn
+   green within ~5 seconds and pull your real menu, categories, tables.
+
+If the POS shows up empty (no tables, no products): open Diagnostics from
+the StatusBar (gear icon), copy the snapshot, and check `bootstrap` /
+`syncTransportMode` / `accessTokenStatus`. The snapshot never contains
+your password or token values.
 
 ## Architecture
 
