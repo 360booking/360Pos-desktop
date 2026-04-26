@@ -211,3 +211,41 @@ Sprint 8 / KDS sync needs it.
 `settings.sync.pull.cursor` so a desktop restart picks up where it
 left off; if the cursor is missing the desktop falls back to a cold
 snapshot, which is identical to the first-launch case.
+
+---
+
+## Sprint 7 — server-side lock + payment modal
+
+Two pieces close out the multi-device pilot risks.
+
+**Server-side order lock.** `restaurant_orders` now carries
+`owner_device_id` + `owner_expires_at` + `owner_claimed_at`. Tapping
+a foreign-locked table opens `ClaimOrderModal` and calls
+`POST /api/pos/orders/{id}/claim` with the device's `deviceId`.
+Outcomes:
+
+| Status         | Meaning                                          |
+|----------------|--------------------------------------------------|
+| `claimed`      | Lock granted; this device may now edit.          |
+| `already_owned` | This device already had the lock; expiry bumped. |
+| `conflict`     | Another device holds a valid lock; the modal shows owner + expiry. |
+| `failed`       | `ORDER_NOT_OPEN`, `FORCE_REQUIRES_MANAGER`, etc. |
+
+`force=true` is reserved for `tenant_admin` / `super_admin`. The lock
+TTL is 10 minutes; the desktop heartbeat (every ~minute) can pass
+`renewLocksFor: [orderId, …]` to push expiries forward, but the
+backend only bumps rows where `owner_device_id == device_id` so a
+device can never use the heartbeat to silently take over.
+
+The pull response includes `ownerDeviceId`, `ownerExpiresAt`, and a
+backend-computed `currentDeviceCanEdit` boolean. The desktop sends
+its own `device_id` as a query param so the backend can stamp this
+boolean per row.
+
+**Card-payment unknown.** `CARD_PAYMENT_UNKNOWN` is treated as
+forensic-only: the dedup spine row lands as `accepted/stored`, no
+payment is registered, the order's `payment_status` stays `unpaid`.
+The desktop's `PaymentModal` surfaces a clear recovery prompt and
+the operator must reconcile manually (check the terminal slip)
+before retrying. This matches the same rule already in
+`fiscal-flow.md` for fiscal `unknown` outcomes.

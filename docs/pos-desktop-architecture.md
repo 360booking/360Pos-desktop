@@ -262,6 +262,50 @@ The outer transaction is committed once, at the end of the `/api/pos/sync/push` 
 | `PAYMENT_REGISTERED` | ✅ Sprint 4 | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
 | `DISCOUNT_APPLIED`, `TIP_ADDED`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 6+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
 
+### Order lock (Sprint 7)
+
+`restaurant_orders` gains three columns via Alembic `posown0428`:
+
+```
+owner_device_id   varchar  nullable, indexed
+owner_expires_at  timestamp nullable
+owner_claimed_at  timestamp nullable
+```
+
+Two new endpoints:
+
+```
+POST /api/pos/orders/{id}/claim
+  body  { deviceId, tenantId?, restaurantId?, force? }
+  → status: 'claimed' | 'already_owned' | 'conflict' | 'failed'
+    + orderId, ownerDeviceId, expiresAt, message
+
+POST /api/pos/orders/{id}/release
+  body  { deviceId }
+  → ownerDeviceId=null on success
+```
+
+Lock TTL is `ORDER_LOCK_TTL_SECONDS` (10 min). A heartbeat from the
+lock owner can renew expiries via the existing
+`/api/pos/devices/{id}/heartbeat` endpoint with `renewLocksFor:
+[orderId, …]`. The heartbeat only bumps rows where
+`owner_device_id == device_id` — a device can never use the heartbeat
+to silently take over someone else's table.
+
+`force=true` is allowed only for `tenant_admin` / `super_admin`. A
+waiter sending `force=true` gets `failed / FORCE_REQUIRES_MANAGER`.
+The pull response now includes `ownerDeviceId`, `ownerExpiresAt`,
+and a server-computed `currentDeviceCanEdit` boolean. The desktop
+threads its own `device_id` through the pull query string
+(`?device_id=POS-01`) so the backend can stamp the boolean per
+order.
+
+Read-only enforcement on the desktop is still client-side
+(`assertOwnedLocally` in pos-core, plus the `Lock` badge on
+foreign-locked TablesPane cards). The server-side lock closes the
+race; the client gate remains the single chokepoint that prevents
+unauthorised mutations from being constructed in the first place.
+
 ### Pull contract (Sprint 6)
 
 `GET /api/pos/sync/pull?since=<iso>` is the live read channel. Where push

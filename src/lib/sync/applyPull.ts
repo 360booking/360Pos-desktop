@@ -50,8 +50,9 @@ export async function applyPullChanges(
       await tx.execute(
         `INSERT INTO remote_orders (id, table_id, status, payment_status, is_open,
            subtotal_cents, discount_cents, tip_cents, total_cents, currency, source,
-           opened_at, closed_at, sent_to_kitchen_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           opened_at, closed_at, sent_to_kitchen_at, updated_at,
+           owner_device_id, owner_expires_at, current_device_can_edit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            table_id = excluded.table_id,
            status = excluded.status,
@@ -67,6 +68,9 @@ export async function applyPullChanges(
            closed_at = excluded.closed_at,
            sent_to_kitchen_at = excluded.sent_to_kitchen_at,
            updated_at = excluded.updated_at,
+           owner_device_id = excluded.owner_device_id,
+           owner_expires_at = excluded.owner_expires_at,
+           current_device_can_edit = excluded.current_device_can_edit,
            fetched_at = datetime('now')`,
         [
           o.id,
@@ -84,6 +88,9 @@ export async function applyPullChanges(
           o.closedAt,
           o.sentToKitchenAt,
           o.updatedAt ?? new Date().toISOString(),
+          o.ownerDeviceId ?? null,
+          o.ownerExpiresAt ?? null,
+          o.currentDeviceCanEdit !== false ? 1 : 0,
         ],
       );
       ordersUpserted += 1;

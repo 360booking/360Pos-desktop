@@ -20,6 +20,10 @@ export interface RemoteOrderRow {
   source: string | null;
   opened_at: string | null;
   sent_to_kitchen_at: string | null;
+  // Sprint 7
+  owner_device_id: string | null;
+  owner_expires_at: string | null;
+  current_device_can_edit: number;
 }
 
 export interface RemoteOrderItemRow {
@@ -55,7 +59,8 @@ export async function readRemoteSnapshot(exec: SqlExecutor): Promise<RemoteSnaps
     exec.select<RemoteOrderRow>(
       `SELECT id, table_id, status, payment_status, is_open,
               subtotal_cents, discount_cents, tip_cents, total_cents,
-              currency, source, opened_at, sent_to_kitchen_at
+              currency, source, opened_at, sent_to_kitchen_at,
+              owner_device_id, owner_expires_at, current_device_can_edit
          FROM remote_orders
         WHERE is_open = 1
         ORDER BY opened_at ASC`,

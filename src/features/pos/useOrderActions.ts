@@ -15,6 +15,7 @@ import { useCallback, useMemo } from 'react';
 import {
   addItem,
   createOrder,
+  registerCardPaymentResult,
   registerCashPayment,
   ROMANIAN_DEFAULT_VAT_BP,
   sendToKitchen,
@@ -175,11 +176,53 @@ export function useOrderActions() {
     setOrder(r.next);
   }, [order, setOrder]);
 
+  // Sprint 7 — explicit cash with arbitrary amount (modal-driven).
+  const payCashAmount = useCallback(
+    async (amountCents: number, acceptOverTender = false) => {
+      if (!order) return;
+      const ctx = buildCtx();
+      const r = await runAction(() =>
+        registerCashPayment(order, { amountCents, acceptOverTender }, ctx),
+      );
+      setOrder(r.next);
+    },
+    [order, setOrder],
+  );
+
+  // Sprint 7 — card outcome from the simulator/two-step modal.
+  const recordCardOutcome = useCallback(
+    async (
+      amountCents: number,
+      status: 'approved' | 'declined' | 'cancelled' | 'unknown',
+      terminal: { authCode?: string; rrn?: string; trace?: string } = {},
+    ) => {
+      if (!order) return;
+      const ctx = buildCtx();
+      const r = await runAction(() =>
+        registerCardPaymentResult(
+          order,
+          {
+            amountCents,
+            status,
+            terminalAuthCode: terminal.authCode,
+            terminalRrn: terminal.rrn,
+            terminalTrace: terminal.trace,
+          },
+          ctx,
+        ),
+      );
+      setOrder(r.next);
+    },
+    [order, setOrder],
+  );
+
   return {
     order,
     newOrder,
     addProduct,
     payCash,
+    payCashAmount,
+    recordCardOutcome,
     incrementQuantity,
     decrementQuantity,
     removeItem,

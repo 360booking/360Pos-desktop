@@ -9,12 +9,13 @@
  */
 import { fetchPullChanges, type PullChangesResponse } from '@/lib/api/pull';
 import { applyPullChanges, readPullCursor, type ApplyPullResult } from './applyPull';
+import { getConfig } from '@/lib/config';
 import type { SqlExecutor } from '@/lib/db/executor';
 
 export interface RunPullOptions {
   exec: SqlExecutor;
   /** Override the fetcher in tests. */
-  fetcher?: (since: string | null) => Promise<PullChangesResponse>;
+  fetcher?: (since: string | null, deviceId?: string | null) => Promise<PullChangesResponse>;
 }
 
 export type RunPullResult =
@@ -31,7 +32,9 @@ export async function runPull(opts: RunPullOptions): Promise<RunPullResult> {
   }
   let pull: PullChangesResponse;
   try {
-    pull = await fetcher(cursor);
+    // Sprint 7 — pass deviceId so the backend can stamp
+    // currentDeviceCanEdit per row in the response.
+    pull = await fetcher(cursor, getConfig().deviceId);
   } catch (err) {
     return { ok: false, error: err as Error };
   }

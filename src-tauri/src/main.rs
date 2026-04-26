@@ -11,6 +11,8 @@ const MIGRATION_V2_EVENTS_ORDER_LINK: &str =
     include_str!("../../src/sql/migrations/0002_events_order_link.sql");
 const MIGRATION_V3_REMOTE_READ_MODEL: &str =
     include_str!("../../src/sql/migrations/0003_remote_read_model.sql");
+const MIGRATION_V4_REMOTE_ORDERS_OWNERSHIP: &str =
+    include_str!("../../src/sql/migrations/0004_remote_orders_ownership.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -77,6 +79,12 @@ fn main() {
             version: 3,
             description: "remote read model — Sprint 6",
             sql: MIGRATION_V3_REMOTE_READ_MODEL,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "remote_orders ownership — Sprint 7",
+            sql: MIGRATION_V4_REMOTE_ORDERS_OWNERSHIP,
             kind: MigrationKind::Up,
         },
     ];

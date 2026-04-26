@@ -22,6 +22,10 @@ export interface RemoteOrder {
   closedAt: string | null;
   sentToKitchenAt: string | null;
   updatedAt: string | null;
+  // Sprint 7
+  ownerDeviceId?: string | null;
+  ownerExpiresAt?: string | null;
+  currentDeviceCanEdit?: boolean;
 }
 
 export interface RemoteOrderItem {
@@ -63,9 +67,13 @@ export interface PullChangesResponse {
 
 export async function fetchPullChanges(
   since: string | null,
+  deviceId?: string | null,
 ): Promise<PullChangesResponse> {
+  const params: Record<string, string> = {};
+  if (since) params.since = since;
+  if (deviceId) params.device_id = deviceId;
   const r = await getApiClient().get<PullChangesResponse>('/api/pos/sync/pull', {
-    params: since ? { since } : undefined,
+    params: Object.keys(params).length ? params : undefined,
   });
   return r.data;
 }

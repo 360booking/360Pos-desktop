@@ -2,10 +2,13 @@ import { useMemo, useState } from 'react';
 import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
 import { StatusBar } from './StatusBar';
 import { KitchenQueueStrip } from './KitchenQueueStrip';
+import { ClaimOrderModal } from './ClaimOrderModal';
+import { PaymentModal } from './PaymentModal';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
 import { useRemote } from '@/store/remote';
+import { getSyncEngine } from '@/lib/sync/bootstrap';
 import type { ProductRow, TableRow } from '@/lib/db/catalogQueries';
 import type { RemoteOrderRow } from '@/lib/db/remoteQueries';
 import {
@@ -32,13 +35,38 @@ export function PosShell() {
     () => (actions.order ? computeTotals(actions.order) : EMPTY_TOTALS),
     [actions.order],
   );
+
+  // Modal states. ClaimOrderModal opens when the operator taps a remote
+  // table whose lock is held by another device. PaymentModal opens from
+  // the cart's Cash button.
+  const [claimTarget, setClaimTarget] = useState<RemoteOrderRow | null>(null);
+  const [paymentOpen, setPaymentOpen] = useState(false);
+
+  function handleTablePick(tableId: string) {
+    const remote = useRemote.getState().orders.find((o) => o.table_id === tableId);
+    if (remote && !remote.current_device_can_edit) {
+      // Foreign-locked → don't auto-create a new draft, prompt for claim.
+      setClaimTarget(remote);
+      return;
+    }
+    void actions.newOrder(tableId);
+  }
+
+  function onClaimedFromModal() {
+    setClaimTarget(null);
+    // Trigger a fresh pull so the cache flips currentDeviceCanEdit
+    // immediately without waiting for the 8s tick.
+    const engine = getSyncEngine();
+    void engine?.pullScheduler.runNow();
+  }
+
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
       <StatusBar />
       <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <TablesPane
-          onPickTable={(id) => void actions.newOrder(id)}
+          onPickTable={handleTablePick}
           activeOrder={actions.order}
           totals={totals}
         />
@@ -46,7 +74,7 @@ export function PosShell() {
         <CartPane
           order={actions.order}
           totals={totals}
-          onCash={() => void actions.payCash()}
+          onCash={() => setPaymentOpen(true)}
           onClear={() => actions.clear()}
           onIncrement={(id) => void actions.incrementQuantity(id)}
           onDecrement={(id) => void actions.decrementQuantity(id)}
@@ -54,6 +82,27 @@ export function PosShell() {
           onSendToKitchen={() => void actions.sendOrderToKitchen()}
         />
       </div>
+      {claimTarget && (
+        <ClaimOrderModal
+          orderId={claimTarget.id}
+          ownerDeviceId={claimTarget.owner_device_id}
+          expiresAt={claimTarget.owner_expires_at}
+          canForce={false}
+          onClose={() => setClaimTarget(null)}
+          onClaimed={onClaimedFromModal}
+        />
+      )}
+      {paymentOpen && actions.order && (
+        <PaymentModal
+          orderId={actions.order.id}
+          totals={totals}
+          onClose={() => setPaymentOpen(false)}
+          onCash={(amt, over) => actions.payCashAmount(amt, over)}
+          onCardOutcome={(amt, status, terminal) =>
+            actions.recordCardOutcome(amt, status, terminal)
+          }
+        />
+      )}
     </div>
   );
 }
@@ -185,7 +234,7 @@ function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
                     status={statusForRemote(remote)}
                     totalCents={remote.total_cents}
                     openedAtIso={remote.opened_at}
-                    isForeign={true}
+                    isForeign={!remote.current_device_can_edit}
                     onPick={() => onPickTable(t.id)}
                   />
                 );

@@ -239,3 +239,26 @@ Each slice closes a row from this audit; when the row's deltas are gone, strike 
 - The `feedback` (lower-right toast) layer in web is driven by `react-hot-toast`; desktop already imports the same package. No work needed.
 - Both panes use the same lucide icons. No icon swap.
 - Both rely on Tailwind 3.4 with no theme extensions. Class strings copy verbatim — no rebuild step.
+
+---
+
+## Sprint 7 closeout — 2026-04-26
+
+Closed in this sprint:
+
+- ~~Payment modal + Card-POS confirmation~~. New `PaymentModal` opens from the cart's Cash button (replacing the old direct-cash shortcut). Cash row with editable tender + change-due preview. Card row with three-state two-step: idle → dialling (terminal busy) → approved / declined / unknown. Approved auto-closes; declined offers retry; unknown surfaces a recovery prompt and persists `CARD_PAYMENT_UNKNOWN` without marking the order paid. Card disabled offline at the button level + a second guard inside `registerCardPaymentResult`.
+- **Server-side order lock** (Sprint 7 / 1) — backend Alembic `posown0428` adds `owner_device_id` / `owner_expires_at` / `owner_claimed_at` to `restaurant_orders`. New endpoints `POST /api/pos/orders/{id}/claim` and `/release`. Lock TTL = 10 minutes; heartbeat can renew via `renewLocksFor`. `force=true` requires manager. Pull stamps `currentDeviceCanEdit` per order so the desktop renders the lock badge correctly without a second round trip.
+- **Claim modal** (`ClaimOrderModal`) opens when the operator taps a foreign-locked table. Shows owner + expires_at; offers normal claim and (for managers) force claim. Successful claim triggers an immediate `pullScheduler.runNow()` so the lock badge flips visually within a tick.
+
+New deltas (Tier-3 desktop-only, justified):
+
+| Delta | Reason | Where |
+|---|---|---|
+| `PaymentModal` two-step card with simulator | Web POS has the same two-step pattern; we mirror it but route through `SimulatorPaymentAdapter` until the real BT POS lands | `pos-desktop/src/features/pos/PaymentModal.tsx` |
+| `ClaimOrderModal` | Web POS has no concept of multi-station ownership; desktop adds it because two POS desktops can collide on the same table | `pos-desktop/src/features/pos/ClaimOrderModal.tsx` |
+
+Backend tests: 10 new (claim happy / already_owned / conflict / force-rejected / force-by-manager / expired-lock-takeover / release-by-owner / release-by-other / pull-includes-owner / card-unknown-no-payment). 34 backend tests pass (was 30 at end of Sprint 6).
+
+pos-desktop tests: 3 new orderLock tests (claim happy, conflict pass-through, release). 125 vitest tests pass (was 122).
+
+Slice 3 (walk-in / delivery sheets) — **deferred again**. Lock + payment surface filled the sprint exactly. Rolled into Sprint 8.
