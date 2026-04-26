@@ -146,3 +146,34 @@ After a crash mid-action, on next boot:
 - **No fiscal-number pre-allocation.** The audit recommended block reservation, but real Datecs hardware emits the fiscal number from the device — we trust the response, store it after the fact, and refuse to invent a number locally. (See `fiscal-flow.md`.)
 - **No automatic retry on fiscal `unknown`.** Risk of double-printing. See fiscal-flow.md.
 - **No auto-fiscalisation when payment status is `unknown`.** Same reason.
+
+---
+
+## Sprint 4 — server-authoritative IDs and bootstrap refresh
+
+Sprint 4 closes out the offline-sync contract for the order pipeline with two rules.
+
+### orderLocalId ↔ orderServerId mapping
+
+The desktop generates a UUID for every new order locally (`orderLocalId`) so it can keep working without backend latency or connectivity. The backend, when it processes the first `ORDER_CREATED` for that local id, generates the *real* `restaurant_orders.id` and returns it in `serverState.orderId`. The mapping is persisted on both sides:
+
+- **Desktop (SQLite `events` table):** writes `orderServerId` onto its event row once the push succeeds; the cart pane treats `orderServerId` as authoritative once known.
+- **Backend (`pos_sync_events`):** stores both `order_local_id` and `order_server_id` on the row that processed `ORDER_CREATED`, and the same `order_server_id` on every later event for the same `order_local_id`.
+
+**Resolution rule.** Any later event (`ORDER_ITEM_ADDED`, `PAYMENT_REGISTERED`, …) may arrive at the backend with **only `orderLocalId`** — the desktop need not block waiting for the round-trip. The `/api/pos/sync/push` handler resolves `orderServerId` from the prior mapping (`pos_sync_events` filtered on `order_local_id` with `order_server_id IS NOT NULL`) and proceeds. If no prior `ORDER_CREATED` exists, the event is recorded as `failed` with `errorCode=ORDER_NOT_FOUND`.
+
+### Duplicate `ORDER_CREATED`
+
+A replay returns the **same** `orderServerId`. The dedup spine is `pos_sync_events.mutation_id` (UNIQUE); on a duplicate push the server replays `result_json` verbatim without invoking `restaurant_order_service.create_draft` a second time. This is what makes the desktop safe to retry indefinitely on a flaky link.
+
+### Bootstrap refresh — 30-minute background cadence
+
+On top of the existing manual + first-launch refreshes, the desktop runs a background `fetchBootstrap()` every 30 minutes. The refresh is **non-disruptive**:
+
+1. **In-flight order is not affected.** The current cart and any draft orders keep using the price/VAT snapshot they captured at `addItem` time.
+2. **Item-level price/VAT snapshot.** When an item is added to an order, its `unitPrice`, `vatRate`, and `name` are frozen on the order line. A subsequent menu price change does *not* mutate that line. This matches `restaurant_order_service.add_item` server-side, which writes `unit_price` and `name_snapshot` on the `RestaurantOrderItem` row.
+3. **Newly-inactive products.** If a product becomes `isActive=false` server-side, the desktop hides it from the **add-to-cart** flow but keeps it visible on any open order that already has it. No silent removal.
+4. **Offline behaviour.** If the device is offline at the 30-minute tick, the refresh is skipped and retried on the next cycle. The status bar shows the timestamp of the last successful bootstrap.
+5. **Refresh failure.** A failing refresh does not interrupt the POS; the UI surfaces a yellow `Bootstrap stale` indicator and falls back to the cached SQLite snapshot.
+
+The first version uses full-bootstrap refresh (idempotent UPSERT into the local catalogue tables). When `/api/pos/sync/pull?since=cursor` ships its real diff (Sprint 8/9), the 30-minute cadence switches to delta pull and full bootstrap becomes a defensive fallback only.

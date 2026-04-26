@@ -206,6 +206,63 @@ pos-core stays correct (tip out of VAT base); backend stays as-is for now. To be
 | 10 | Installer + GitHub release pipeline | src-tauri/tauri.conf.json updater config |
 | 11 | Pilot stabilisation | diagnostics, telemetry |
 
+## Sprint 4 — server-authoritative IDs and live-table forwarding
+
+Sprint 4 connects the dedup spine (Sprint 3) to the actual `restaurant_orders` / `restaurant_order_items` / `restaurant_order_payments` tables and locks in the `orderLocalId ↔ orderServerId` contract.
+
+### ID lifecycle
+
+```
+desktop:                               backend:
+─────────                              ────────
+runAction(ORDER_CREATED)
+  ├─ orderLocalId = uuid()
+  └─ event → outbox            ─push─►  POST /api/pos/sync/push
+                                          └─ create_draft(restaurant=..., waiter_id=user.id)
+                                              └─ order.id ← uuid()             ← server-generated
+                                          └─ pos_sync_events.row(
+                                                order_local_id, order_server_id=order.id,
+                                                mutation_id, …)
+                                          ◄─ serverState.orderId
+event store update on outcome                ↑                                    ↑
+  ├─ orderServerId saved on event row        │                                    │
+  └─ cart pane treats it as authoritative    │                                    │
+                                                                                  │
+runAction(ORDER_ITEM_ADDED, …)                                                    │
+  ├─ payload references productId, quantity                                       │
+  └─ event.orderLocalId = "o-1"  ─push─►  POST /api/pos/sync/push                  │
+                                          └─ resolve order_server_id ────────────┘
+                                              from pos_sync_events
+                                                where order_local_id="o-1"
+                                                AND   order_server_id IS NOT NULL
+                                          └─ add_item(order, menu_item, qty)
+                                          ◄─ serverState.itemId, totals
+```
+
+The desktop never has to wait for `serverState.orderId` before pushing the next mutation — `orderLocalId` alone is enough for the backend to resolve. Only when the desktop wants to show the server-side id (for staff-side support, or the URL of a printed receipt) does it need `orderServerId`.
+
+### Dedup spine vs. live-table writes
+
+Each push runs in two layers inside one DB transaction:
+
+1. The forwarder runs inside `db.begin_nested()` (a SQLite/Postgres SAVEPOINT). On success it commits the savepoint; on `ValueError` it rolls back the savepoint *only*, so any half-written row from `add_item` / `add_payment` is discarded.
+2. The `pos_sync_events` row itself is then inserted in the outer transaction with `result_status='accepted'` or `'failed'` depending on what happened. The dedup spine row therefore *always* lands, which lets the desktop replay and discover the failure without re-attempting the side effects.
+
+The outer transaction is committed once, at the end of the `/api/pos/sync/push` call, after all events in the batch have been processed.
+
+### Forwarder coverage
+
+| Event type | Forwarded? | Service called | serverState fields |
+|---|---|---|---|
+| `ORDER_CREATED` | ✅ | `restaurant_order_service.create_draft` | `orderId`, `status`, `isOpen`, `totals` |
+| `ORDER_ITEM_ADDED` | ✅ | `restaurant_order_service.add_item` | `itemId`, `orderId`, `lineTotal`, `totals` |
+| `PAYMENT_REGISTERED` | ✅ | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
+| `ORDER_ITEM_VOIDED`, `DISCOUNT_APPLIED`, `TIP_ADDED`, `SENT_TO_KITCHEN`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 5+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
+
+### Auth tightening
+
+Every `/api/pos/*` endpoint **except** `/health` now requires `require_restaurant_waiter` (waiter / tenant_admin / super_admin). `/health` stays public because the desktop status bar polls it before login, and because it is the same contract as `/api/health`.
+
 ## Why we did NOT introduce a global pnpm-workspace yet
 
 Doing so would require modifying `/opt/360booking/frontend/package.json` and the deploy pipeline, which Sprint 0 explicitly forbids. `pos-desktop/` is a self-contained package with its own `package.json` and `node_modules`. When Sprint 1 introduces `packages/pos-core`, we revisit and likely add a workspace root with `frontend`, `pos-desktop`, and `packages/*` — but only if that change can be done without touching the web build/deploy.
