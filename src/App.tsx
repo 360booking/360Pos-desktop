@@ -31,18 +31,26 @@ export default function App() {
   }, [hydrate]);
 
   // 3) Sync engine starts ONLY after login + restaurant pick.
+  //
+  // App.tsx is the SOLE owner of the engine lifecycle. Children
+  // (useCatalogBootstrap) read the singleton via getSyncEngine() and
+  // never call startSyncEngine() themselves — that previously raced
+  // with this effect because child mount effects run before the
+  // parent's, taking the singleton with restaurantId=undefined.
   useEffect(() => {
     if (status !== 'authenticated' || !selectedRestaurant) {
       return;
     }
     let stop: (() => void) | undefined;
-    startSyncEngine({ restaurantId: selectedRestaurant.id }).then((e) => {
-      if (!e) return;
+    let cancelled = false;
+    void startSyncEngine({ restaurantId: selectedRestaurant.id }).then((e) => {
+      if (cancelled || !e) return;
       setEngine(e);
       stop = e.stop;
       logger.info('sync', 'engine started', { restaurantId: selectedRestaurant.id });
     });
     return () => {
+      cancelled = true;
       stop?.();
       setEngine(null);
     };
@@ -64,6 +72,16 @@ export default function App() {
   // status === 'authenticated' from here.
   if (!selectedRestaurant) {
     return <RestaurantPicker />;
+  }
+  // Hold PosShell back until the engine is ready so children can rely
+  // on getSyncEngine() returning a non-null value with the right
+  // restaurantId.
+  if (!engine) {
+    return (
+      <div className="grid min-h-screen w-full place-items-center bg-slate-950 text-slate-400">
+        <div className="text-sm">Pornire sincronizare...</div>
+      </div>
+    );
   }
   return <PosShell />;
 }

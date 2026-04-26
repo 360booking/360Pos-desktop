@@ -12,7 +12,7 @@
  * "no catalogue yet" state.
  */
 import { useEffect } from 'react';
-import { startSyncEngine, getSyncEngine } from '@/lib/sync/bootstrap';
+import { getSyncEngine } from '@/lib/sync/bootstrap';
 import { useCatalog } from '@/store/catalog';
 import { useRemote } from '@/store/remote';
 
@@ -23,7 +23,12 @@ export function useCatalogBootstrap() {
     let unsubscribePull: (() => void) | null = null;
 
     (async () => {
-      const engine = getSyncEngine() ?? (await startSyncEngine());
+      // App.tsx owns engine lifecycle and only mounts PosShell once the
+      // engine is ready, so getSyncEngine() is non-null here. We do NOT
+      // call startSyncEngine ourselves — that race was the Sprint 10
+      // tenant-build "no tables" bug (engine was started without the
+      // selected restaurant id).
+      const engine = getSyncEngine();
       if (cancelled || !engine) return;
 
       // Initial loads — both the catalog (categories/products/tables)

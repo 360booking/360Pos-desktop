@@ -18,6 +18,7 @@ import { runBootstrap, type RunBootstrapResult } from './runBootstrap';
 import { startPullScheduler, type PullScheduler } from './pullScheduler';
 import { runPull, type RunPullResult } from './runPull';
 import { startHeartbeatScheduler, type HeartbeatScheduler } from './heartbeatScheduler';
+import { rememberBootstrap } from './lastBootstrap';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
 
@@ -83,14 +84,21 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
   // coming up — the cached SQLite stays the source of truth.
   const listeners = new Set<BootstrapListener>();
   const broadcast = (r: RunBootstrapResult) => {
+    rememberBootstrap(r, restaurantId ?? null);
     for (const fn of listeners) {
       try { fn(r); } catch { /* swallow — keep other listeners running */ }
     }
   };
   const cfg = getConfig();
   // Sprint 10: caller-supplied restaurantId (from login picker) wins over
-  // the config-baked one. Demo builds keep working when neither is set.
-  const restaurantId = opts.restaurantId ?? cfg.restaurantId;
+  // the auth-store selection, which itself wins over the config-baked
+  // value (now always null in tenant builds). Defence in depth — if any
+  // future caller starts the engine without an explicit option, we still
+  // pick up the user's actual restaurant from the auth store rather
+  // than the empty cfg default.
+  const { useAuthStore } = await import('@/store/auth');
+  const authRestaurantId = useAuthStore.getState().selectedRestaurant?.id ?? null;
+  const restaurantId = opts.restaurantId ?? authRestaurantId ?? cfg.restaurantId;
   if (cfg.syncTransportMode === 'http') {
     void runBootstrap({ exec, restaurantId }).then(broadcast);
   }

@@ -16,6 +16,10 @@ import { useRemote } from '@/store/remote';
 import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
 import { readLastHealth } from '@/lib/api/healthLast';
+import {
+  readLastBootstrap,
+  readLastBootstrapRestaurantId,
+} from '@/lib/sync/lastBootstrap';
 
 export interface DiagnosticsSnapshot {
   // ─── App / config ─────────────────────────────────────────────────
@@ -60,6 +64,27 @@ export interface DiagnosticsSnapshot {
   /** Short error message — never headers, never tokens. */
   healthErrorDetail: string | null;
   healthErrorStatus: number | null;
+
+  // ─── Bootstrap visibility (Sprint 10 / E) ─────────────────────────
+  /** restaurant_id we asked the backend for. null if engine never ran. */
+  bootstrapRestaurantIdSent: string | null;
+  /** Restaurant the backend resolved + name. null when bootstrap hasn't run. */
+  bootstrapRestaurantIdResolved: string | null;
+  bootstrapRestaurantNameResolved: string | null;
+  /** Counts from the most recent backend response. null when never ran. */
+  bootstrapCategoriesCount: number | null;
+  bootstrapProductsCount: number | null;
+  bootstrapTablesCount: number | null;
+  /** 'ok' | 'error' | 'never_ran' */
+  bootstrapStatus: 'ok' | 'error' | 'never_ran';
+  bootstrapError: string | null;
+
+  // ─── Local SQLite counts (post-hydrate) ───────────────────────────
+  localCategoriesCount: number;
+  localProductsCount: number;
+  localTablesCount: number;
+  localOpenOrdersCount: number;
+  localKitchenTicketsCount: number;
 
   // ─── Local DB ─────────────────────────────────────────────────────
   /** Filename only (full path lives at %APPDATA%\360booking-pos\). */
@@ -114,6 +139,7 @@ export function snapshot(): DiagnosticsSnapshot {
     accessStatus = secondsToExpiry > 0 ? 'present' : 'expired';
   }
   const lastHealth = readLastHealth();
+  const lastBootstrap = readLastBootstrap();
 
   return {
     appVersion: '0.1.0',
@@ -143,6 +169,35 @@ export function snapshot(): DiagnosticsSnapshot {
     healthErrorClass: lastHealth?.errorClass ?? null,
     healthErrorDetail: lastHealth?.errorDetail ?? null,
     healthErrorStatus: lastHealth?.errorStatus ?? null,
+
+    bootstrapRestaurantIdSent: readLastBootstrapRestaurantId(),
+    bootstrapRestaurantIdResolved: lastBootstrap?.ok
+      ? lastBootstrap.bootstrap.restaurant?.id ?? null
+      : null,
+    bootstrapRestaurantNameResolved: lastBootstrap?.ok
+      ? lastBootstrap.bootstrap.restaurant?.name ?? null
+      : null,
+    bootstrapCategoriesCount: lastBootstrap?.ok
+      ? lastBootstrap.bootstrap.categories.length
+      : null,
+    bootstrapProductsCount: lastBootstrap?.ok
+      ? lastBootstrap.bootstrap.products.length
+      : null,
+    bootstrapTablesCount: lastBootstrap?.ok
+      ? lastBootstrap.bootstrap.tables.length
+      : null,
+    bootstrapStatus: !lastBootstrap
+      ? 'never_ran'
+      : lastBootstrap.ok
+        ? 'ok'
+        : 'error',
+    bootstrapError: lastBootstrap && !lastBootstrap.ok ? String(lastBootstrap.error) : null,
+
+    localCategoriesCount: cat.categories.length,
+    localProductsCount: cat.products.length,
+    localTablesCount: cat.tables.length,
+    localOpenOrdersCount: rem.orders.length,
+    localKitchenTicketsCount: rem.tickets.length,
 
     sqliteDbName: 'pos-desktop.db',
 

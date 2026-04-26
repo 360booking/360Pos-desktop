@@ -12,7 +12,14 @@ import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
 import { useRemote } from '@/store/remote';
+import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
+import { runBootstrap } from '@/lib/sync/runBootstrap';
+import {
+  readLastBootstrap,
+  readLastBootstrapRestaurantId,
+  rememberBootstrap,
+} from '@/lib/sync/lastBootstrap';
 import type { ProductRow, TableRow } from '@/lib/db/catalogQueries';
 import type { RemoteOrderRow } from '@/lib/db/remoteQueries';
 import {
@@ -258,10 +265,7 @@ function TablesPane({ onPickTable, onPickNewOrder, activeOrder, totals }: Tables
 
       <div className="flex-1 overflow-y-auto p-3">
         {tables.length === 0 ? (
-          <EmptyHint
-            label={hydrated ? 'Niciun rând în catalog' : 'Se încarcă…'}
-            sub={hydrated ? 'Verifică /api/pos/bootstrap.' : null}
-          />
+          <TablesEmptyState hydrated={hydrated} />
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {tables.map((t) => {
@@ -490,6 +494,94 @@ function EmptyHint({ label, sub }: { label: string; sub?: string | null }) {
       <Utensils className="h-8 w-8 text-slate-600" />
       <p>{label}</p>
       {sub && <p className="text-[11px] text-slate-500">{sub}</p>}
+    </div>
+  );
+}
+
+/**
+ * Self-diagnosing empty state for the tables grid. Surfaces the same
+ * counts the Diagnostics modal would, plus a Refresh button that
+ * re-fires runBootstrap with the currently-selected restaurant id.
+ *
+ * The user-reported "I see no tables" symptom can come from many
+ * places (engine started without restaurantId, backend has 0 tables
+ * for the resolved restaurant, hydrate failed, etc.). Showing the
+ * counts inline lets a tester self-triage without opening Diagnostics.
+ */
+function TablesEmptyState({ hydrated }: { hydrated: boolean }) {
+  const auth = useAuthStore();
+  const [refreshing, setRefreshing] = useState(false);
+  const [bootstrapRev, setBootstrapRev] = useState(0);
+  const last = readLastBootstrap();
+  const lastSentRestaurantId = readLastBootstrapRestaurantId();
+
+  async function refresh() {
+    if (refreshing) return;
+    const engine = getSyncEngine();
+    if (!engine) return;
+    setRefreshing(true);
+    try {
+      const r = await runBootstrap({
+        exec: engine.exec,
+        restaurantId: auth.selectedRestaurant?.id ?? null,
+      });
+      rememberBootstrap(r, auth.selectedRestaurant?.id ?? null);
+      if (r.ok) {
+        await useCatalog.getState().refreshFromDb(engine.exec);
+      }
+      setBootstrapRev((n) => n + 1);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+  void bootstrapRev; // touch so eslint doesn't flag setBootstrapRev unused
+
+  let bootstrapLine: string;
+  if (!last) {
+    bootstrapLine = hydrated ? 'Bootstrap nu a rulat încă.' : 'Se încarcă...';
+  } else if (!last.ok) {
+    bootstrapLine = `Bootstrap a eșuat: ${String(last.error).slice(0, 100)}`;
+  } else {
+    const b = last.bootstrap;
+    bootstrapLine = `Bootstrap OK · ${b.tables.length} mese · ${b.products.length} produse · ${b.categories.length} categorii.`;
+  }
+
+  return (
+    <div className="flex flex-col items-stretch gap-3 text-sm text-slate-400">
+      <div className="flex flex-col items-center gap-2 text-center">
+        <Utensils className="h-7 w-7 text-slate-600" />
+        <p>{hydrated ? 'Niciun rând în catalog local.' : 'Se încarcă…'}</p>
+      </div>
+      <div className="rounded-lg border border-white/5 bg-slate-950/60 p-2 text-[11px] leading-relaxed">
+        <p className="text-slate-300">
+          <span className="text-slate-500">Restaurant:</span>{' '}
+          {auth.selectedRestaurant?.name ?? '—'}
+        </p>
+        <p className="truncate text-slate-500">
+          <span>Trimis bootstrap pentru:</span>{' '}
+          {lastSentRestaurantId ? (
+            <span title={lastSentRestaurantId}>
+              {lastSentRestaurantId.slice(0, 8)}…
+            </span>
+          ) : (
+            '—'
+          )}
+        </p>
+        <p className="mt-1 text-slate-300">{bootstrapLine}</p>
+        {last?.ok && last.bootstrap.restaurant ? (
+          <p className="text-slate-500">
+            Backend: {last.bootstrap.restaurant.name}
+          </p>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={refresh}
+        disabled={refreshing}
+        className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/[0.08] disabled:opacity-60"
+      >
+        {refreshing ? 'Reîncarc…' : 'Reîncarcă bootstrap'}
+      </button>
     </div>
   );
 }
