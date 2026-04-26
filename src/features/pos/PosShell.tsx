@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Plus, Users, Utensils, Receipt, Send, CreditCard, Banknote } from 'lucide-react';
+import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
 import { StatusBar } from './StatusBar';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
@@ -33,13 +33,21 @@ export function PosShell() {
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
       <StatusBar />
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        <TablesPane onPickTable={(id) => void actions.newOrder(id)} />
+        <TablesPane
+          onPickTable={(id) => void actions.newOrder(id)}
+          activeOrder={actions.order}
+          totals={totals}
+        />
         <MenuPane onPickProduct={(p) => void actions.addProduct(p)} />
         <CartPane
           order={actions.order}
           totals={totals}
           onCash={() => void actions.payCash()}
           onClear={() => actions.clear()}
+          onIncrement={(id) => void actions.incrementQuantity(id)}
+          onDecrement={(id) => void actions.decrementQuantity(id)}
+          onRemove={(id) => void actions.removeItem(id)}
+          onSendToKitchen={() => void actions.sendOrderToKitchen()}
         />
       </div>
     </div>
@@ -59,7 +67,47 @@ const EMPTY_TOTALS: OrderTotals = {
 
 /* ─── Left pane: tables ──────────────────────────────────────────────────── */
 
-function TablesPane({ onPickTable }: { onPickTable: (tableId: string) => void }) {
+interface TablesPaneProps {
+  onPickTable: (tableId: string) => void;
+  activeOrder: Order | null;
+  totals: OrderTotals;
+}
+
+type TableSlotStatus =
+  | 'empty'
+  | 'open'
+  | 'unsent'
+  | 'sent'
+  | 'partial'
+  | 'paid';
+
+function statusForActive(order: Order, totals: OrderTotals): TableSlotStatus {
+  if (order.state === 'paid' || order.state === 'closed') return 'paid';
+  if (totals.paidCents > 0 && totals.remainingCents > 0) return 'partial';
+  const active = order.items.filter((it) => !it.voidedAt);
+  if (active.length === 0) return 'open';
+  if (active.some((it) => !it.sentAt)) return 'unsent';
+  return 'sent';
+}
+
+const STATUS_PILL: Record<TableSlotStatus, { label: string; className: string }> = {
+  empty: { label: 'Liberă', className: 'text-emerald-300' },
+  open: { label: 'Deschisă', className: 'text-violet-300' },
+  unsent: { label: 'Netrimis', className: 'text-amber-300' },
+  sent: { label: 'Trimis', className: 'text-emerald-300' },
+  partial: { label: 'Plată parțială', className: 'text-amber-300' },
+  paid: { label: 'Plătită', className: 'text-emerald-300' },
+};
+const STATUS_DOT: Record<TableSlotStatus, string> = {
+  empty: 'bg-emerald-400',
+  open: 'bg-violet-400',
+  unsent: 'bg-amber-300',
+  sent: 'bg-emerald-400',
+  partial: 'bg-amber-300',
+  paid: 'bg-slate-400',
+};
+
+function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
   const tables = useCatalog((s) => s.tables);
   const hydrated = useCatalog((s) => s.hydrated);
 
@@ -86,9 +134,22 @@ function TablesPane({ onPickTable }: { onPickTable: (tableId: string) => void })
           />
         ) : (
           <div className="grid grid-cols-2 gap-2">
-            {tables.map((t) => (
-              <TableButton key={t.id} t={t} onPick={() => onPickTable(t.id)} />
-            ))}
+            {tables.map((t) => {
+              const isActive = activeOrder?.tableId === t.id;
+              const status: TableSlotStatus = isActive
+                ? statusForActive(activeOrder!, totals)
+                : 'empty';
+              return (
+                <TableButton
+                  key={t.id}
+                  t={t}
+                  status={status}
+                  totalCents={isActive ? totals.totalCents : null}
+                  openedAtIso={isActive ? activeOrder!.openedAt : null}
+                  onPick={() => onPickTable(t.id)}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -106,21 +167,56 @@ function TablesPane({ onPickTable }: { onPickTable: (tableId: string) => void })
   );
 }
 
-function TableButton({ t, onPick }: { t: TableRow; onPick: () => void }) {
-  // No occupied state in the local catalogue yet — Sprint 5 brings the
-  // open-tabs sync in. For now every table renders as available.
+function formatElapsed(openedAtIso: string): string {
+  const now = Date.now();
+  const opened = Date.parse(openedAtIso);
+  if (Number.isNaN(opened) || now < opened) return '—';
+  const diffSec = Math.floor((now - opened) / 1000);
+  const m = Math.floor(diffSec / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m`;
+  return `${diffSec}s`;
+}
+
+interface TableButtonProps {
+  t: TableRow;
+  status: TableSlotStatus;
+  totalCents: number | null;
+  openedAtIso: string | null;
+  onPick: () => void;
+}
+
+function TableButton({ t, status, totalCents, openedAtIso, onPick }: TableButtonProps) {
+  const pill = STATUS_PILL[status];
   return (
     <button
       type="button"
       onClick={onPick}
-      className="touch-target relative aspect-[4/3] rounded-xl border border-white/10 bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center"
+      className={`touch-target relative aspect-[4/3] rounded-xl border bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center ${
+        status === 'unsent' || status === 'partial'
+          ? 'border-amber-400/40'
+          : status === 'sent'
+            ? 'border-emerald-400/40'
+            : 'border-white/10'
+      }`}
     >
-      <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-emerald-400" />
+      <span className={`absolute top-2 right-2 h-2 w-2 rounded-full ${STATUS_DOT[status]}`} />
       <span className="text-lg font-bold text-white leading-none">{t.table_number}</span>
       {t.capacity != null && (
         <span className="text-[10px] text-slate-400 mt-1">{t.capacity} loc.</span>
       )}
-      <span className="text-[10px] mt-1 text-emerald-300">Liberă</span>
+      <span className={`text-[10px] mt-1 ${pill.className}`}>{pill.label}</span>
+      {totalCents != null && totalCents > 0 && (
+        <span className="text-[10px] mt-0.5 font-semibold text-violet-200 tabular-nums">
+          {formatMoney(totalCents)}
+        </span>
+      )}
+      {openedAtIso && (
+        <span className="text-[9px] mt-0.5 text-slate-500 tabular-nums">
+          {formatElapsed(openedAtIso)}
+        </span>
+      )}
     </button>
   );
 }
@@ -226,9 +322,22 @@ interface CartPaneProps {
   totals: OrderTotals;
   onCash: () => void;
   onClear: () => void;
+  onIncrement: (itemId: string) => void;
+  onDecrement: (itemId: string) => void;
+  onRemove: (itemId: string) => void;
+  onSendToKitchen: () => void;
 }
 
-function CartPane({ order, totals, onCash, onClear }: CartPaneProps) {
+function CartPane({
+  order,
+  totals,
+  onCash,
+  onClear,
+  onIncrement,
+  onDecrement,
+  onRemove,
+  onSendToKitchen,
+}: CartPaneProps) {
   // Show the *blended* effective rate so the label stays accurate when the
   // order mixes food (9%) and bar (19%) lines.
   const effectiveRatePct = (() => {
@@ -237,7 +346,23 @@ function CartPane({ order, totals, onCash, onClear }: CartPaneProps) {
     return (totals.vatCents / net) * 100;
   })();
   const activeItems = order?.items.filter((it) => !it.voidedAt) ?? [];
+  const unsentCount = activeItems.filter((it) => !it.sentAt).length;
+  const sentCount = activeItems.length - unsentCount;
   const canPay = order != null && totals.totalCents > 0 && order.state !== 'paid' && order.state !== 'cancelled';
+  // Three Trimite states matching POSPage.tsx:
+  //   draft / open + unsent items     → violet "Trimite"
+  //   sent + new items added after    → amber "Trimite update (N)"
+  //   sent + nothing new              → locked "Trimis"
+  const sendKind: 'send' | 'update' | 'locked' | 'disabled' =
+    order == null
+      ? 'disabled'
+      : unsentCount === 0
+        ? sentCount > 0
+          ? 'locked'
+          : 'disabled'
+        : sentCount === 0
+          ? 'send'
+          : 'update';
 
   return (
     <aside className="flex w-80 bg-slate-950/60 backdrop-blur border-l border-white/10 flex-col">
@@ -263,20 +388,17 @@ function CartPane({ order, totals, onCash, onClear }: CartPaneProps) {
 
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5">
         {activeItems.map((it) => (
-          <div
+          <CartItemRow
             key={it.id}
-            className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2"
-          >
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-white truncate">{it.productName}</div>
-              <div className="text-[11px] text-slate-400">
-                {it.quantity} × {formatMoney(it.unitPriceCents)}
-              </div>
-            </div>
-            <div className="text-sm font-semibold text-violet-200 tabular-nums ml-3">
-              {formatMoney(it.lineTotalCents)}
-            </div>
-          </div>
+            name={it.productName}
+            quantity={it.quantity}
+            unitPriceCents={it.unitPriceCents}
+            lineTotalCents={it.lineTotalCents}
+            isSent={it.sentAt != null}
+            onIncrement={() => onIncrement(it.id)}
+            onDecrement={() => onDecrement(it.id)}
+            onRemove={() => onRemove(it.id)}
+          />
         ))}
         {activeItems.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center text-slate-400 text-sm gap-3">
@@ -288,20 +410,23 @@ function CartPane({ order, totals, onCash, onClear }: CartPaneProps) {
 
       <div className="border-t border-white/10 p-3 space-y-2 bg-slate-950/80 backdrop-blur">
         <Row label="Subtotal" value={formatMoney(totals.subtotalCents)} />
+        {totals.discountCents > 0 && (
+          <Row label="Discount" value={`− ${formatMoney(totals.discountCents)}`} accent="emerald" />
+        )}
+        {totals.tipCents > 0 && (
+          <Row label="Bacșiș" value={formatMoney(totals.tipCents)} accent="amber" />
+        )}
         <Row
           label={`TVA (${effectiveRatePct.toFixed(0)}% efectiv)`}
           value={formatMoney(totals.vatCents)}
           muted
         />
         <Row label="Total" value={formatMoney(totals.totalCents)} big />
+        {totals.paidCents > 0 && (
+          <Row label="Plătit" value={formatMoney(totals.paidCents)} accent="emerald" />
+        )}
         <div className="grid grid-cols-2 gap-2 pt-2">
-          <button
-            type="button"
-            disabled
-            className="touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-violet-600/40 text-violet-200 border border-violet-400/20 disabled:opacity-50"
-          >
-            <Send className="h-4 w-4" /> Trimite
-          </button>
+          <SendButton kind={sendKind} count={unsentCount} onClick={onSendToKitchen} />
           <button
             type="button"
             disabled={!canPay}
@@ -328,22 +453,149 @@ function Row({
   value,
   muted = false,
   big = false,
+  accent,
 }: {
   label: string;
   value: string;
   muted?: boolean;
   big?: boolean;
+  accent?: 'emerald' | 'amber';
 }) {
+  const valueClass = big
+    ? 'text-lg font-bold text-white'
+    : accent === 'emerald'
+      ? 'text-sm font-semibold text-emerald-300'
+      : accent === 'amber'
+        ? 'text-sm font-semibold text-amber-300'
+        : 'text-sm font-semibold text-slate-200';
   return (
     <div className="flex items-center justify-between">
       <span className={`text-sm ${muted ? 'text-slate-400' : 'text-slate-200'}`}>{label}</span>
-      <span
-        className={`tabular-nums ${
-          big ? 'text-lg font-bold text-white' : 'text-sm font-semibold text-slate-200'
-        }`}
-      >
-        {value}
-      </span>
+      <span className={`tabular-nums ${valueClass}`}>{value}</span>
     </div>
+  );
+}
+
+interface CartItemRowProps {
+  name: string;
+  quantity: number;
+  unitPriceCents: number;
+  lineTotalCents: number;
+  isSent: boolean;
+  onIncrement: () => void;
+  onDecrement: () => void;
+  onRemove: () => void;
+}
+
+function CartItemRow({
+  name,
+  quantity,
+  unitPriceCents,
+  lineTotalCents,
+  isSent,
+  onIncrement,
+  onDecrement,
+  onRemove,
+}: CartItemRowProps) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-white truncate flex items-center gap-1.5">
+            {name}
+            {isSent && (
+              <span className="text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-400/30">
+                trimis
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {formatMoney(unitPriceCents)} / buc
+          </div>
+        </div>
+        <div className="text-sm font-semibold text-violet-200 tabular-nums ml-3">
+          {formatMoney(lineTotalCents)}
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center border border-white/10 bg-slate-900/60 rounded-lg overflow-hidden">
+          <button
+            type="button"
+            onClick={onDecrement}
+            className="touch-target px-2 py-1 text-slate-300 hover:bg-white/5 disabled:opacity-40"
+            aria-label="Scade cantitatea"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </button>
+          <span className="px-3 text-sm font-semibold text-white tabular-nums">
+            {quantity}
+          </span>
+          <button
+            type="button"
+            onClick={onIncrement}
+            className="touch-target px-2 py-1 text-slate-300 hover:bg-white/5"
+            aria-label="Crește cantitatea"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="touch-target p-1.5 rounded-lg text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+          aria-label="Șterge produsul"
+          title={isSent ? 'Anulează acest item (trimis la bucătărie)' : 'Șterge din comandă'}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface SendButtonProps {
+  kind: 'send' | 'update' | 'locked' | 'disabled';
+  count: number;
+  onClick: () => void;
+}
+
+function SendButton({ kind, count, onClick }: SendButtonProps) {
+  if (kind === 'locked') {
+    return (
+      <button
+        type="button"
+        disabled
+        className="touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-emerald-600/15 text-emerald-300/70 border border-emerald-400/30 disabled:opacity-90"
+      >
+        <Lock className="h-4 w-4" /> Trimis
+      </button>
+    );
+  }
+  if (kind === 'update') {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-amber-500/20 text-amber-200 border border-amber-400/40 hover:bg-amber-500/30"
+      >
+        <Send className="h-4 w-4" /> Trimite update ({count})
+      </button>
+    );
+  }
+  // 'send' or 'disabled'
+  const disabled = kind === 'disabled';
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 ${
+        disabled
+          ? 'bg-violet-600/40 text-violet-200 border border-violet-400/20 opacity-50'
+          : 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-900/40 hover:from-violet-500 hover:to-indigo-500 border border-violet-400/40'
+      }`}
+    >
+      <Send className="h-4 w-4" /> Trimite
+    </button>
   );
 }

@@ -17,6 +17,9 @@ import {
   createOrder,
   registerCashPayment,
   ROMANIAN_DEFAULT_VAT_BP,
+  sendToKitchen,
+  setItemQuantity,
+  voidItem,
   type ActionCtx,
   type CategoryType,
   type TenantVatConfig,
@@ -115,5 +118,72 @@ export function useOrderActions() {
     setOrder(r.next);
   }, [order, setOrder]);
 
-  return { order, newOrder, addProduct, payCash, clear };
+  const incrementQuantity = useCallback(
+    async (itemId: string) => {
+      if (!order) return;
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      const ctx = buildCtx();
+      const r = await runAction(() =>
+        setItemQuantity(order, { itemId, quantity: item.quantity + 1 }, ctx),
+      );
+      setOrder(r.next);
+    },
+    [order, setOrder],
+  );
+
+  const decrementQuantity = useCallback(
+    async (itemId: string) => {
+      if (!order) return;
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      const ctx = buildCtx();
+      // qty=1 + decrement = void; otherwise just decrement.
+      if (item.quantity <= 1) {
+        const r = await runAction(() =>
+          voidItem(order, { itemId, reason: 'qty zero' }, ctx),
+        );
+        setOrder(r.next);
+      } else {
+        const r = await runAction(() =>
+          setItemQuantity(order, { itemId, quantity: item.quantity - 1 }, ctx),
+        );
+        setOrder(r.next);
+      }
+    },
+    [order, setOrder],
+  );
+
+  const removeItem = useCallback(
+    async (itemId: string, reason: string = 'removed by waiter') => {
+      if (!order) return;
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      const ctx = buildCtx();
+      const r = await runAction(() =>
+        voidItem(order, { itemId, reason }, ctx),
+      );
+      setOrder(r.next);
+    },
+    [order, setOrder],
+  );
+
+  const sendOrderToKitchen = useCallback(async () => {
+    if (!order) return;
+    const ctx = buildCtx();
+    const r = await runAction(() => sendToKitchen(order, {}, ctx));
+    setOrder(r.next);
+  }, [order, setOrder]);
+
+  return {
+    order,
+    newOrder,
+    addProduct,
+    payCash,
+    incrementQuantity,
+    decrementQuantity,
+    removeItem,
+    sendOrderToKitchen,
+    clear,
+  };
 }

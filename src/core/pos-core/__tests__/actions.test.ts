@@ -11,6 +11,7 @@ import {
   registerCardPaymentResult,
   registerCashPayment,
   sendToKitchen,
+  setItemQuantity,
   voidItem,
 } from '../actions';
 import {
@@ -112,6 +113,52 @@ describe('addItem', () => {
         makeCtx(),
       ),
     ).toThrow(OrderCancelledError);
+  });
+});
+
+describe('setItemQuantity', () => {
+  it('updates quantity in place + recomputes line total + emits event', () => {
+    const { ctx, order } = seedOrder([{ unitCents: 1000, qty: 1, cat: 'bar' }]);
+    const item = order.items[0];
+    const r = setItemQuantity(order, { itemId: item.id, quantity: 3 }, ctx);
+    expect(r.next.items).toHaveLength(1);
+    expect(r.next.items[0].quantity).toBe(3);
+    expect(r.next.items[0].lineTotalCents).toBe(3000);
+    expect(r.next.subtotalCents).toBe(3000);
+    expect(r.events).toHaveLength(1);
+    expect(r.events[0].type).toBe('ORDER_ITEM_QTY_UPDATED');
+    expect((r.events[0].payload as { localItemId: string }).localItemId).toBe(item.id);
+    expect((r.events[0].payload as { newQuantity: number }).newQuantity).toBe(3);
+  });
+
+  it('rejects non-positive quantities', () => {
+    const { ctx, order } = seedOrder([{ unitCents: 500, qty: 1, cat: 'bar' }]);
+    const item = order.items[0];
+    expect(() => setItemQuantity(order, { itemId: item.id, quantity: 0 }, ctx)).toThrow();
+    expect(() => setItemQuantity(order, { itemId: item.id, quantity: -2 }, ctx)).toThrow();
+  });
+
+  it('refuses to update a voided line', () => {
+    const { ctx, order } = seedOrder([{ unitCents: 500, qty: 1, cat: 'bar' }]);
+    const item = order.items[0];
+    const voided = voidItem(order, { itemId: item.id, reason: 'gone' }, ctx).next;
+    expect(() =>
+      setItemQuantity(voided, { itemId: item.id, quantity: 5 }, ctx),
+    ).toThrow();
+  });
+});
+
+describe('addItem payload (Sprint 5 — localItemId)', () => {
+  it('emits localItemId equal to the new line.id', () => {
+    const { ctx, order } = seedOrder([]);
+    const r = addItem(
+      order,
+      { productId: null, productName: 'Cola', quantity: 1, unitPriceCents: 900, categoryType: 'bar' },
+      ctx,
+    );
+    const newLine = r.next.items[r.next.items.length - 1];
+    const payload = r.events[0].payload as { localItemId: string };
+    expect(payload.localItemId).toBe(newLine.id);
   });
 });
 

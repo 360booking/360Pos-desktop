@@ -48,6 +48,7 @@ import type {
   OrderClosedPayload,
   OrderCreatedPayload,
   OrderItemAddedPayload,
+  OrderItemQtyUpdatedPayload,
   OrderItemVoidedPayload,
   PaymentRegisteredPayload,
   SentToKitchenPayload,
@@ -195,6 +196,7 @@ export function addItem(
       next,
       'ORDER_ITEM_ADDED',
       {
+        localItemId: itemId,
         itemMutationId,
         productId: cmd.productId,
         productName: cmd.productName,
@@ -207,6 +209,60 @@ export function addItem(
     ),
   );
   return { next, events };
+}
+
+// ─── setItemQuantity ────────────────────────────────────────────────────────
+
+export interface SetItemQuantityCommand {
+  itemId: LocalId;
+  quantity: number;
+}
+
+/** Update a line's quantity in place. Sprint 5: positive quantities only —
+ * to take a line off the order, use voidItem. The corresponding backend
+ * forwarder calls restaurant_order_service.update_item(quantity=…) which
+ * also rejects 0/negative. */
+export function setItemQuantity(
+  order: Order,
+  cmd: SetItemQuantityCommand,
+  ctx: ActionCtx,
+): ActionResult {
+  assertNotCancelled(order);
+  assertNotFiscalised(order);
+  assertOwnedLocally(order, ctx.deviceId, ctx.online);
+  if (cmd.quantity <= 0) {
+    throw new Error('quantity must be > 0; void the line instead');
+  }
+  const target = order.items.find((it) => it.id === cmd.itemId);
+  if (!target) throw new Error(`Item not found: ${cmd.itemId}`);
+  if (target.voidedAt) throw new Error(`Item already voided: ${cmd.itemId}`);
+
+  const newLineTotal = lineTotalCents(target.unitPriceCents, cmd.quantity);
+  const next = withRefreshedTotals({
+    ...order,
+    items: order.items.map((it) =>
+      it.id === cmd.itemId
+        ? { ...it, quantity: cmd.quantity, lineTotalCents: newLineTotal }
+        : it,
+    ),
+  });
+  const mutationId = ctx.ids.newMutationId();
+  return {
+    next,
+    events: [
+      envelope<OrderItemQtyUpdatedPayload>(
+        ctx,
+        next,
+        'ORDER_ITEM_QTY_UPDATED',
+        {
+          localItemId: cmd.itemId,
+          newQuantity: cmd.quantity,
+          lineTotalCents: newLineTotal,
+        },
+        mutationId,
+      ),
+    ],
+  };
 }
 
 // ─── voidItem ───────────────────────────────────────────────────────────────

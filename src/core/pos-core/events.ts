@@ -19,6 +19,7 @@ export type EventType =
   | 'ORDER_CREATED'
   | 'ORDER_ITEM_ADDED'
   | 'ORDER_ITEM_VOIDED'
+  | 'ORDER_ITEM_QTY_UPDATED'
   | 'DISCOUNT_APPLIED'
   | 'TIP_ADDED'
   | 'SENT_TO_KITCHEN'
@@ -49,6 +50,9 @@ export interface OrderCreatedPayload {
 }
 
 export interface OrderItemAddedPayload {
+  /** Local UUID of the line — backend uses it to map mutations on this
+   * item back to the server row it created in _handle_item_added. */
+  localItemId: LocalId;
   itemMutationId: MutationId;
   productId: LocalId | null;
   productName: string;
@@ -59,8 +63,20 @@ export interface OrderItemAddedPayload {
 }
 
 export interface OrderItemVoidedPayload {
+  /** Local UUID of the line being voided. The backend resolves the
+   * server-side item id by looking up an earlier ORDER_ITEM_ADDED with
+   * the same localItemId in pos_sync_events. */
   itemId: LocalId;
   reason: string;
+}
+
+export interface OrderItemQtyUpdatedPayload {
+  /** Local UUID of the line whose quantity changed. */
+  localItemId: LocalId;
+  newQuantity: number;
+  /** Pre-computed by pos-core so the backend can mirror the totals
+   * without re-running the price formula. */
+  lineTotalCents: number;
 }
 
 export interface DiscountAppliedPayload {

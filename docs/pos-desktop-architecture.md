@@ -254,10 +254,33 @@ The outer transaction is committed once, at the end of the `/api/pos/sync/push` 
 
 | Event type | Forwarded? | Service called | serverState fields |
 |---|---|---|---|
-| `ORDER_CREATED` | ✅ | `restaurant_order_service.create_draft` | `orderId`, `status`, `isOpen`, `totals` |
-| `ORDER_ITEM_ADDED` | ✅ | `restaurant_order_service.add_item` | `itemId`, `orderId`, `lineTotal`, `totals` |
-| `PAYMENT_REGISTERED` | ✅ | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
-| `ORDER_ITEM_VOIDED`, `DISCOUNT_APPLIED`, `TIP_ADDED`, `SENT_TO_KITCHEN`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 5+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
+| `ORDER_CREATED` | ✅ Sprint 4 | `restaurant_order_service.create_draft` | `orderId`, `status`, `isOpen`, `totals` |
+| `ORDER_ITEM_ADDED` | ✅ Sprint 4 | `restaurant_order_service.add_item` | `itemId`, `orderId`, `lineTotal`, `totals` |
+| `ORDER_ITEM_QTY_UPDATED` | ✅ Sprint 5 | `restaurant_order_service.update_item(quantity=…)` | `itemId`, `orderId`, `quantity`, `lineTotal`, `totals` |
+| `ORDER_ITEM_VOIDED` | ✅ Sprint 5 | in-pos.py soft-void (`status='void'`, `line_total=0`) + `_recalculate_totals` | `itemId`, `orderId`, `status`, `totals` |
+| `SENT_TO_KITCHEN` | ✅ Sprint 5 | `restaurant_order_service.send_to_kitchen` (one ticket per station) | `orderId`, `status`, `kitchenTicketIds`, `stations` |
+| `PAYMENT_REGISTERED` | ✅ Sprint 4 | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
+| `DISCOUNT_APPLIED`, `TIP_ADDED`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 6+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
+
+### Per-line server-id mapping (Sprint 5)
+
+`ORDER_ITEM_ADDED` carries `payload.localItemId` — the desktop's UUID
+for the new line. The backend forwarder writes `result_json.itemId` =
+the server `RestaurantOrderItem.id` it just created.
+
+For any later mutation on the same line (`ORDER_ITEM_VOIDED`,
+`ORDER_ITEM_QTY_UPDATED`), the desktop only needs to send the
+`localItemId`. The backend resolves it through
+`_resolve_server_item_id`, which scans accepted `ORDER_ITEM_ADDED`
+rows in `pos_sync_events` (filtered by `tenant_id`) and matches on
+`payload_json.localItemId`. The tenant filter keeps the lookup
+cheap; the secondary index on `event_type` plus the tenant index
+makes the scan fit in memory for any realistic order size.
+
+This mirrors the order-id mapping (Sprint 4) but at one level
+deeper. The dedup spine still wins: a duplicate mutation_id replays
+the stored result, and a forwarded mutation that finds no prior
+add lands as `failed` with `errorCode=ITEM_NOT_FOUND`.
 
 ### Auth tightening
 

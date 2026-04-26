@@ -168,13 +168,36 @@ The tier-1 list is too large for a single sprint. Suggested slicing:
 
 | Sprint | Slice | Notes |
 |---|---|---|
-| 5 | Inline quantity stepper + per-item void; Trimite / Trimite-update / Trimis state machine; SENT_TO_KITCHEN forwarder | Closes the most-used cart actions |
-| 5 | Per-table elapsed time + running total | Read-only; depends on open-tabs sync |
+| 5 ✅ | Inline quantity stepper + per-item void; Trimite / Trimite-update / Trimis state machine; SENT_TO_KITCHEN forwarder | Shipped 2026-04-26 |
+| 5 ✅ | Per-table elapsed time + running total | Shipped 2026-04-26 (read from `useCurrentOrder`; multi-table sync = Sprint 6) |
 | 6 | Walk-in `SourceSection`s + new-order sheet + delivery sheet | The whole "non-table" intake surface |
 | 6 | KitchenQueueStrip | Read-only display, but needs a kitchen tickets feed |
 | 7 | Payment modal + Card-POS confirmation + payment-link flow | Pairs with the BT POS adapter |
 | 8 | Fiscal order panel | Pairs with the Datecs adapter |
 | 11 | Notification bell + ready-from-kitchen toasts | Polish |
+
+---
+
+## Sprint 5 closeout — 2026-04-26
+
+Closed in this sprint (Tier-1 rows now striking through):
+
+- ~~Inline quantity stepper per item — web has Minus/Plus buttons + Trash2~~. Desktop has the same Minus/Plus controls in `border-white/10 bg-slate-900/60 rounded-lg overflow-hidden` plus the per-line trash button. `useOrderActions.incrementQuantity` / `decrementQuantity` / `removeItem` route everything through `runAction()` so the events land in the outbox before the UI updates.
+- ~~Conditional totals rows (Discount / Bacșiș / Plătit)~~. CartPane now renders the discount line emerald, tip amber, paid emerald, exactly like web — only when the underlying value is non-zero.
+- ~~"Trimite update (N)" amber variant~~. New `SendButton` component handles all four states: violet "Trimite" on a fresh draft, amber "Trimite update (N)" when items were added after a previous send, locked "Trimis" badge once everything is sent, and a disabled stub when there's no order.
+- ~~Per-table elapsed time + running total~~. `TablesPane` now reads `useCurrentOrder` + `OrderTotals` and stamps each card with a status pill (`Liberă | Deschisă | Netrimis | Trimis | Plată parțială | Plătită`), the running total for the active table, and a `formatElapsed()` clock relative to `order.openedAt`. Limitation: only the table the operator is currently working on shows live state — multi-table simultaneous tracking lands when open-tabs sync ships in Sprint 6.
+
+Backend additions:
+- `_handle_sent_to_kitchen` → `restaurant_order_service.send_to_kitchen` (creates one ticket per station). Idempotent: duplicate replays return the same `kitchenTicketIds`.
+- `_handle_item_voided` → soft-flags the line (`status='void'`, `line_total=0`) and recalculates totals. Never deletes the row.
+- `_handle_item_qty_updated` → `restaurant_order_service.update_item(quantity=…)`. Rejects `quantity <= 0` to keep the void path explicit.
+- `_resolve_server_item_id(local_item_id)` → maps the desktop's local UUID to the server-side `RestaurantOrderItem.id` by scanning `pos_sync_events.payload_json` for the prior `ORDER_ITEM_ADDED` whose `localItemId` matches. Cheap because of the `tenant_id` filter.
+
+Pos-core additions:
+- `setItemQuantity(order, {itemId, quantity}, ctx)` action + `ORDER_ITEM_QTY_UPDATED` event type.
+- `OrderItemAddedPayload` gains `localItemId` so the backend can resolve later mutations on the same line. Existing tests still pass.
+
+Visual deltas remaining (Tier-1 leftovers): walk-in source sections, new-order/delivery sheets, kitchen queue strip, payment modal, card-POS confirmation, fiscal panel, notification bell. Allocations for these are unchanged in the table above.
 
 Each slice closes a row from this audit; when the row's deltas are gone, strike them from the Tier-1 list above.
 
