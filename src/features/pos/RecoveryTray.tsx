@@ -117,9 +117,19 @@ export function RecoveryTray({ onClose }: { onClose: () => void }) {
                   </button>
                   <button
                     type="button"
-                    disabled
-                    className="touch-target rounded-lg px-3 py-1.5 text-[12px] font-semibold bg-violet-600/20 text-violet-300/70 border border-violet-400/20 inline-flex items-center gap-1.5 opacity-60"
-                    title="Disponibil când adaptorul real BT POS e activ (Sprint 9+)"
+                    onClick={async () => {
+                      // Sprint 9: hook to the BT POS skeleton. Until
+                      // the real adapter is configured (Sprint 10),
+                      // this returns 'not_found' which we surface as a
+                      // "still unknown — confirm manually" message.
+                      const { NULL_BT_ECR_ADAPTER } = await import('@/adapters/payment/bt-ecr');
+                      const r = await NULL_BT_ECR_ADAPTER.statusForRrn(row.terminal_rrn ?? '');
+                      // For Sprint 9 we don't auto-resolve — display a hint and let the operator decide.
+                      // eslint-disable-next-line no-alert
+                      alert(`Status terminal pentru RRN ${row.terminal_rrn ?? '(none)'}: ${r.status}\n${r.rawTrace ?? ''}`);
+                    }}
+                    className="touch-target rounded-lg px-3 py-1.5 text-[12px] font-semibold bg-violet-600/30 text-violet-200 border border-violet-400/40 inline-flex items-center gap-1.5 hover:bg-violet-600/50"
+                    title="Întreabă terminalul (skeleton — adaptor real în Sprint 10)"
                   >
                     <RefreshCw className="h-3.5 w-3.5" /> Retry
                   </button>

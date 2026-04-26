@@ -83,6 +83,30 @@ export function useOrderActions() {
     [setOrder],
   );
 
+  // Sprint 9 — non-table intake with customer fields.
+  const newOrderWithCustomer = useCallback(
+    async (
+      source: 'walkin' | 'home_delivery',
+      customer: {
+        customerName?: string;
+        customerPhone?: string;
+        customerAddress?: string;
+        notes?: string;
+      },
+    ) => {
+      const ctx = buildCtx();
+      const r = await runAction(() =>
+        createOrder(
+          { tableId: null, source, vatConfig: vatConfigDefault(), ...customer },
+          ctx,
+        ),
+      );
+      setOrder(r.next);
+      return r.next;
+    },
+    [setOrder],
+  );
+
   const addProduct = useCallback(
     async (p: ProductRow) => {
       const ctx = buildCtx();
@@ -219,6 +243,7 @@ export function useOrderActions() {
   return {
     order,
     newOrder,
+    newOrderWithCustomer,
     addProduct,
     payCash,
     payCashAmount,

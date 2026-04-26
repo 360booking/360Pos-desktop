@@ -95,6 +95,16 @@ export function startHeartbeatScheduler(
     inFlight = tickOnce();
     try {
       const r = await inFlight;
+      // Sprint 9: one quick retry on a network/HTTP failure so a
+      // single dropped packet doesn't postpone the lock renewal by
+      // a full minute. Skipped offline/unpaired errors are NOT
+      // retried — they're not transport problems.
+      if (!r.ok && r.error && !['UNPAIRED', 'OFFLINE_SKIPPED'].includes(r.error.message)) {
+        await new Promise((res) => setTimeout(res, 2_000));
+        const retry = await tickOnce();
+        opts.onResult?.(retry);
+        return retry;
+      }
       opts.onResult?.(r);
       return r;
     } finally {

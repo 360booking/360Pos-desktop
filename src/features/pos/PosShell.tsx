@@ -5,6 +5,7 @@ import { KitchenQueueStrip } from './KitchenQueueStrip';
 import { ClaimOrderModal } from './ClaimOrderModal';
 import { PaymentModal } from './PaymentModal';
 import { RecoveryTray } from './RecoveryTray';
+import { NewOrderSheet } from './NewOrderSheet';
 import { useRecovery } from '@/store/recovery';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
@@ -44,6 +45,7 @@ export function PosShell() {
   const [claimTarget, setClaimTarget] = useState<RemoteOrderRow | null>(null);
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [newOrderOpen, setNewOrderOpen] = useState(false);
 
   // Hydrate the recovery list once on mount so the StatusBar pill
   // reflects pre-existing rows from a prior session.
@@ -77,6 +79,7 @@ export function PosShell() {
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <TablesPane
           onPickTable={handleTablePick}
+          onPickNewOrder={() => setNewOrderOpen(true)}
           activeOrder={actions.order}
           totals={totals}
         />
@@ -118,6 +121,24 @@ export function PosShell() {
         />
       )}
       {recoveryOpen && <RecoveryTray onClose={() => setRecoveryOpen(false)} />}
+      {newOrderOpen && (
+        <NewOrderSheet
+          onClose={() => setNewOrderOpen(false)}
+          onPickTable={() => {
+            // No-op — operator continues with the existing tap-on-table
+            // flow. The sheet closes itself.
+          }}
+          onPickWalkIn={(name, notes) => {
+            void actions.newOrderWithCustomer('walkin', {
+              customerName: name,
+              notes,
+            });
+          }}
+          onPickDelivery={(c) => {
+            void actions.newOrderWithCustomer('home_delivery', c);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -137,6 +158,7 @@ const EMPTY_TOTALS: OrderTotals = {
 
 interface TablesPaneProps {
   onPickTable: (tableId: string) => void;
+  onPickNewOrder: () => void;
   activeOrder: Order | null;
   totals: OrderTotals;
 }
@@ -185,7 +207,7 @@ function statusForRemote(o: RemoteOrderRow): TableSlotStatus {
   return o.status === 'draft' ? 'unsent' : 'open';
 }
 
-function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
+function TablesPane({ onPickTable, onPickNewOrder, activeOrder, totals }: TablesPaneProps) {
   const tables = useCatalog((s) => s.tables);
   const hydrated = useCatalog((s) => s.hydrated);
   const remoteOrders = useRemote((s) => s.orders);
@@ -198,6 +220,19 @@ function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
       if (o.table_id) m.set(o.table_id, o);
     }
     return m;
+  }, [remoteOrders]);
+
+  // Sprint 9 — count non-table open orders by source so the operator
+  // can see at a glance how many walk-ins / deliveries are running.
+  const nonTableCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const o of remoteOrders) {
+      if (!o.table_id) {
+        const k = o.source ?? 'pos';
+        counts[k] = (counts[k] ?? 0) + 1;
+      }
+    }
+    return counts;
   }, [remoteOrders]);
 
   return (
@@ -271,9 +306,22 @@ function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
       </div>
 
       <div className="p-3 border-t border-white/10 bg-slate-950/80 backdrop-blur space-y-2">
+        {Object.keys(nonTableCounts).length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1">
+            {Object.entries(nonTableCounts).map(([source, n]) => (
+              <span
+                key={source}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30"
+                title={`${n} comandă deschisă pe sursă "${source}"`}
+              >
+                {source} · {n}
+              </span>
+            ))}
+          </div>
+        )}
         <button
           type="button"
-          onClick={() => onPickTable('')}
+          onClick={onPickNewOrder}
           className="touch-target w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-semibold text-sm shadow-lg shadow-violet-900/40 hover:from-violet-500 hover:to-indigo-500 inline-flex items-center justify-center gap-2 transition"
         >
           <Plus className="h-4 w-4" /> Comandă nouă

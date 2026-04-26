@@ -102,6 +102,12 @@ export interface CreateOrderCommand {
   tableId: LocalId | null;
   source?: Order['source'];
   vatConfig: TenantVatConfig;
+  // Sprint 9 — non-table intake. All optional; populated only for
+  // walk-in / delivery / phone orders.
+  customerName?: string;
+  customerPhone?: string;
+  customerAddress?: string;
+  notes?: string;
 }
 
 export function createOrder(cmd: CreateOrderCommand, ctx: ActionCtx): ActionResult {
@@ -135,7 +141,15 @@ export function createOrder(cmd: CreateOrderCommand, ctx: ActionCtx): ActionResu
     ctx,
     order,
     'ORDER_CREATED',
-    { tableId: order.tableId, source: order.source, ownerDeviceId: order.ownerDeviceId },
+    {
+      tableId: order.tableId,
+      source: order.source,
+      ownerDeviceId: order.ownerDeviceId,
+      ...(cmd.customerName ? { customerName: cmd.customerName } : {}),
+      ...(cmd.customerPhone ? { customerPhone: cmd.customerPhone } : {}),
+      ...(cmd.customerAddress ? { customerAddress: cmd.customerAddress } : {}),
+      ...(cmd.notes ? { notes: cmd.notes } : {}),
+    },
     mutationId,
   );
   return { next: order, events: [event] };

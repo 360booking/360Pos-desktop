@@ -47,6 +47,12 @@ export interface OrderCreatedPayload {
   tableId: LocalId | null;
   source: string;
   ownerDeviceId: DeviceId;
+  /** Sprint 9 — non-table intake. All customer fields are optional;
+   * default-empty for in-house "masă" orders. */
+  customerName?: string;
+  customerPhone?: string;
+  customerAddress?: string;
+  notes?: string;
 }
 
 export interface OrderItemAddedPayload {
