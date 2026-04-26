@@ -94,3 +94,92 @@ Any future delta MUST be appended here with a one-line justification. If a delta
 - [ ] No new icon set introduced; lucide-react only.
 - [ ] No `@layer components` divergence; deltas live as one-off classes in dedicated desktop files.
 - [ ] All deltas listed in this file.
+
+---
+
+## Sprint 4 audit — 2026-04-26
+
+Full pass of `frontend/src/pages/admin/restaurant/POSPage.tsx` (1931 lines) against `pos-desktop/src/features/pos/PosShell.tsx` (349 lines, post-Sprint 4/3). Visual chrome match is good; feature surface is a long way off — most of the hand-off flows (delivery, walk-ins, kitchen pings, payment confirmations) are still on the web side only.
+
+### Visual chrome — matches exactly
+- Shell gradient: `bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100` ✅
+- Pane backgrounds: `bg-slate-950/60 backdrop-blur border-white/10` ✅
+- Card hover: `hover:border-violet-400/60 hover:bg-white/[0.08]` ✅
+- Primary button gradient: `from-violet-600 to-indigo-600 shadow-lg shadow-violet-900/40` ✅
+- Status pills, table card aspect ratio, menu card sizing — all 1:1.
+
+### Tier 1 deltas — present in web, missing in desktop
+
+These are full features, not visual fixes; each is a candidate for its own sprint slice.
+
+#### Tables pane (left)
+- **Walk-in / online / phone / aggregator / pickup `SourceSection`s** — collapsible coloured sections above the table grid showing un-seated orders (Cash/Card badges, customer name/phone/address preview). Web only.
+- **`KitchenQueueStrip`** — pending ticket count, oldest ticket age, median prep time. Drives waiter awareness of bottlenecks. Web only.
+- **Per-table elapsed time** — when a table has a sent order, web shows a Clock icon + `formatElapsed(sent_at)` in the corner. Desktop shows status colour only.
+- **Per-table running total** — web shows the open-tab amount on the table card; desktop shows nothing.
+- **"+ Comandă telefonică"** secondary footer button (rose-tinted, opens a delivery sheet). Desktop missing.
+- **Notification bell toggle** for ready-from-kitchen audio cues (`Bell` / `BellOff`). Desktop missing.
+
+#### Menu pane (centre)
+- **Disabled state on product cards when no active order** — web greys them with `opacity-40 cursor-not-allowed`; desktop relies on `useOrderActions.addProduct` to silently no-op (we currently auto-create a draft). Behavioural difference, not visual.
+- **Search bar / favourites** — none in either today, but flagged as a likely Sprint 6 ask.
+
+#### Cart pane (right)
+- **Inline quantity stepper** per item — web has Minus/Plus buttons (`border-white/10 bg-slate-900/60 rounded-lg`) plus a Trash2 icon for void. Desktop shows a static line.
+- **Conditional totals rows** — web renders Discount (emerald), Tip (amber), and `paid` amount (emerald when `paymentStatus !== 'unpaid'`) only when those values are non-zero. Desktop shows only Subtotal / VAT / Total.
+- **"Trimite update (N)"** amber variant when items have been added after the last kitchen send. Desktop only has a single disabled `Trimite` stub.
+- **"Trimis" locked badge** when the order is fully sent and there's nothing new. Desktop missing.
+- **Discount + Tip micro-buttons** on draft orders (`%` and `Bacșiș`). Desktop missing.
+- **Card POS two-step confirmation** — web fires a `showCardPosConfirm` modal with step-by-step instructions, "Anulează" / "Plată reușită" buttons. Desktop's Card POS button is permanently disabled.
+- **Delivery panel** — when an order has `customer.address`, web shows a rose-bordered box with payment method + customer details + "Trimite link de plată" button (PaymentLinkModal). Desktop missing entirely.
+- **Per-line VAT label** — web doesn't show this either, but the desktop's blended-rate label in the totals row is currently the only VAT signal.
+
+#### Modals / drawers fired from the panes (web only)
+1. **New-order sheet** — table picker for free tables + walk-in fallback.
+2. **Delivery sheet** — customer name, phone, address, delivery payment method, notes.
+3. **Payment modal** — remaining amount, optional CUI capture, Cash/Card buttons.
+4. **Card-POS confirmation** — instructions while the terminal runs.
+5. **Payment-link modal** — Stripe-link URL flow for online checkout.
+6. **Fiscal order panel** — receipt preview + reprint.
+7. **Cancel order** — reason capture before status flips.
+
+None of these are wired in desktop yet.
+
+### Tier 2 deltas — stubs that desktop already shows but doesn't drive
+
+- `Trimite` button is rendered as `disabled`. Wiring lands when `SENT_TO_KITCHEN` joins the forwarder (Sprint 5). Same for Card POS.
+- The VAT label uses the *blended* effective rate (Sprint 1 deviation, see above) — keep until web aligns.
+
+### Tier 3 deltas — desktop-only additions (justified)
+
+- **`StatusBar`** with backend / DB / bootstrap / fiscal / card / printer / queue cells — listed in the "Allowed deltas" table at the top of this file. Web has no equivalent because the browser can't see hardware.
+- **Bootstrap-stale indicator** (Sprint 4 / 2). Web has no bootstrap concept; the page just refetches on focus.
+- **No mobile bottom-tab bar.** Desktop is always 3-pane. Already documented in "Allowed deltas".
+
+### Empty / loading / error state deltas
+
+- **Loading.** Web: `AdminLayout` with centred spinner + "Se încarcă POS-ul…". Desktop: StatusBar + three empty panes; no spinner.
+- **Gated / error.** Web: full-page interstitial with AlertTriangle + back button. Desktop: nothing — operator sees an empty shell.
+- **Empty cart.** Both show centred Receipt + guidance copy. Web adds a mobile-only "Deschide meniu" jump button (n/a on desktop).
+
+### Recommended sprint allocation for the deltas
+
+The tier-1 list is too large for a single sprint. Suggested slicing:
+
+| Sprint | Slice | Notes |
+|---|---|---|
+| 5 | Inline quantity stepper + per-item void; Trimite / Trimite-update / Trimis state machine; SENT_TO_KITCHEN forwarder | Closes the most-used cart actions |
+| 5 | Per-table elapsed time + running total | Read-only; depends on open-tabs sync |
+| 6 | Walk-in `SourceSection`s + new-order sheet + delivery sheet | The whole "non-table" intake surface |
+| 6 | KitchenQueueStrip | Read-only display, but needs a kitchen tickets feed |
+| 7 | Payment modal + Card-POS confirmation + payment-link flow | Pairs with the BT POS adapter |
+| 8 | Fiscal order panel | Pairs with the Datecs adapter |
+| 11 | Notification bell + ready-from-kitchen toasts | Polish |
+
+Each slice closes a row from this audit; when the row's deltas are gone, strike them from the Tier-1 list above.
+
+### What does NOT need to change
+
+- The `feedback` (lower-right toast) layer in web is driven by `react-hot-toast`; desktop already imports the same package. No work needed.
+- Both panes use the same lucide icons. No icon swap.
+- Both rely on Tailwind 3.4 with no theme extensions. Class strings copy verbatim — no rebuild step.
