@@ -9,8 +9,15 @@ import {
   WifiOff,
   AlertTriangle,
   Skull,
+  CloudDownload,
 } from 'lucide-react';
 import { useDeviceStatus, type StatusLevel } from '@/store/deviceStatus';
+import { useCatalog } from '@/store/catalog';
+
+/** A bootstrap older than this counts as stale — yellow dot. The
+ * scheduler ticks every 30 minutes (BOOTSTRAP_REFRESH_MS) so we give it
+ * a generous overlap before warning. */
+const BOOTSTRAP_STALE_MS = 35 * 60 * 1000;
 
 /**
  * Top status bar — desktop-only addition documented in
@@ -50,8 +57,24 @@ function Cell({ icon, label, level, detail }: CellProps) {
   );
 }
 
+function bootstrapStatus(lastSuccessfulAt: string | null): { level: StatusLevel; detail?: string } {
+  if (!lastSuccessfulAt) return { level: 'unknown', detail: 'never' };
+  const ts = Date.parse(lastSuccessfulAt);
+  if (Number.isNaN(ts)) return { level: 'unknown' };
+  const ageMs = Date.now() - ts;
+  if (ageMs < 0) return { level: 'ok' };
+  if (ageMs < BOOTSTRAP_STALE_MS) {
+    const m = Math.floor(ageMs / 60_000);
+    return { level: 'ok', detail: m === 0 ? 'now' : `${m}m` };
+  }
+  const m = Math.floor(ageMs / 60_000);
+  return { level: 'warn', detail: `${m}m` };
+}
+
 export function StatusBar() {
   const s = useDeviceStatus();
+  const lastBootstrapAt = useCatalog((c) => c.lastSuccessfulAt);
+  const bs = bootstrapStatus(lastBootstrapAt);
   return (
     <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-white/10 bg-slate-950/60 backdrop-blur">
       <div className="flex items-center gap-2 overflow-x-auto">
@@ -62,6 +85,12 @@ export function StatusBar() {
           detail={s.backendLatencyMs != null ? `${s.backendLatencyMs}ms` : undefined}
         />
         <Cell icon={<Database className="h-3.5 w-3.5" />} label="DB" level={s.db} />
+        <Cell
+          icon={<CloudDownload className="h-3.5 w-3.5" />}
+          label="Bootstrap"
+          level={bs.level}
+          detail={bs.detail}
+        />
         <Cell icon={<Receipt className="h-3.5 w-3.5" />} label="Fiscal" level={s.fiscal} />
         <Cell
           icon={<CreditCard className="h-3.5 w-3.5" />}

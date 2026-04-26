@@ -1,6 +1,9 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Plus, Users, Utensils, Receipt, Send, CreditCard, Banknote } from 'lucide-react';
 import { StatusBar } from './StatusBar';
+import { useCatalogBootstrap } from './useCatalogBootstrap';
+import { useCatalog } from '@/store/catalog';
+import type { ProductRow, TableRow } from '@/lib/db/catalogQueries';
 import {
   addItem,
   computeTotals,
@@ -16,10 +19,12 @@ import {
 
 /**
  * Three-pane POS shell. Class strings match POSPage.tsx so the visual
- * footprint is identical. Sprint 1 wires CartPane totals through pos-core
- * (still on a demo order — no live data yet).
+ * footprint is identical. Sprint 4 / 2 wires the menu + tables panes to
+ * the local SQLite catalogue (kept fresh by the bootstrap scheduler);
+ * the cart still uses a demo order until Sprint 4 / 3 ports it.
  */
 export function PosShell() {
+  useCatalogBootstrap();
   const { order, totals } = useDemoOrder();
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
@@ -70,14 +75,10 @@ function useDemoOrder(): { order: Order; totals: OrderTotals } {
 
 /* ─── Left pane: tables ──────────────────────────────────────────────────── */
 
-const MOCK_TABLES = Array.from({ length: 12 }, (_, i) => ({
-  id: `t-${i + 1}`,
-  number: i + 1,
-  capacity: 2 + (i % 4),
-  occupied: i % 3 === 0,
-}));
-
 function TablesPane() {
+  const tables = useCatalog((s) => s.tables);
+  const hydrated = useCatalog((s) => s.hydrated);
+
   return (
     <aside className="flex w-72 bg-slate-950/60 backdrop-blur border-r border-white/10 flex-col">
       <header className="px-4 py-3.5 border-b border-white/10">
@@ -85,35 +86,27 @@ function TablesPane() {
           <Users className="h-4 w-4 text-violet-400" /> Mese
         </h2>
         <p className="text-[11px] text-slate-400 mt-0.5">
-          Sprint 0 · placeholder · vezi docs/pos-ui-parity.md
+          {tables.length > 0
+            ? `${tables.length} mese`
+            : hydrated
+              ? 'Niciun rând în catalog'
+              : 'Se încarcă…'}
         </p>
       </header>
 
       <div className="flex-1 overflow-y-auto p-3">
-        <div className="grid grid-cols-2 gap-2">
-          {MOCK_TABLES.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className="touch-target relative aspect-[4/3] rounded-xl border border-white/10 bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center"
-            >
-              <span
-                className={`absolute top-2 right-2 h-2 w-2 rounded-full ${
-                  t.occupied ? 'bg-amber-300' : 'bg-emerald-400'
-                }`}
-              />
-              <span className="text-lg font-bold text-white leading-none">{t.number}</span>
-              <span className="text-[10px] text-slate-400 mt-1">{t.capacity} loc.</span>
-              <span
-                className={`text-[10px] mt-1 ${
-                  t.occupied ? 'text-amber-300' : 'text-emerald-300'
-                }`}
-              >
-                {t.occupied ? 'Ocupată' : 'Liberă'}
-              </span>
-            </button>
-          ))}
-        </div>
+        {tables.length === 0 ? (
+          <EmptyHint
+            label={hydrated ? 'Niciun rând în catalog' : 'Se încarcă…'}
+            sub={hydrated ? 'Verifică /api/pos/bootstrap.' : null}
+          />
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {tables.map((t) => (
+              <TableButton key={t.id} t={t} />
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="p-3 border-t border-white/10 bg-slate-950/80 backdrop-blur space-y-2">
@@ -128,63 +121,112 @@ function TablesPane() {
   );
 }
 
+function TableButton({ t }: { t: TableRow }) {
+  // No occupied state in the local catalogue yet — Sprint 5 brings the
+  // open-tabs sync in. For now every table renders as available.
+  return (
+    <button
+      type="button"
+      className="touch-target relative aspect-[4/3] rounded-xl border border-white/10 bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center"
+    >
+      <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-emerald-400" />
+      <span className="text-lg font-bold text-white leading-none">{t.table_number}</span>
+      {t.capacity != null && (
+        <span className="text-[10px] text-slate-400 mt-1">{t.capacity} loc.</span>
+      )}
+      <span className="text-[10px] mt-1 text-emerald-300">Liberă</span>
+    </button>
+  );
+}
+
 /* ─── Center pane: menu ──────────────────────────────────────────────────── */
 
-const MOCK_CATEGORIES = ['Toate', 'Aperitive', 'Felul I', 'Felul II', 'Băuturi', 'Desert'];
-const MOCK_ITEMS = [
-  { id: 1, name: 'Salată Caesar', price: 28.0 },
-  { id: 2, name: 'Supă cremă de ciuperci', price: 18.0 },
-  { id: 3, name: 'Mușchi de vită Wellington', price: 84.0 },
-  { id: 4, name: 'Pulpă de rață confit', price: 65.0 },
-  { id: 5, name: 'Tartar de somon', price: 42.0 },
-  { id: 6, name: 'Risotto cu ciuperci', price: 48.0 },
-  { id: 7, name: 'Cheesecake casa', price: 24.0 },
-  { id: 8, name: 'Coca-Cola 0.33L', price: 9.0 },
-];
+const ALL_CATEGORIES_ID = '__all__';
 
 function MenuPane() {
+  const categories = useCatalog((s) => s.categories);
+  const products = useCatalog((s) => s.products);
+  const hydrated = useCatalog((s) => s.hydrated);
+  const [activeCategoryId, setActiveCategoryId] = useState<string>(ALL_CATEGORIES_ID);
+
+  const visibleProducts = useMemo(() => {
+    if (activeCategoryId === ALL_CATEGORIES_ID) return products;
+    return products.filter((p) => p.category_id === activeCategoryId);
+  }, [products, activeCategoryId]);
+
+  const tabs: Array<{ id: string; name: string }> = [
+    { id: ALL_CATEGORIES_ID, name: 'Toate' },
+    ...categories.map((c) => ({ id: c.id, name: c.name })),
+  ];
+
   return (
     <section className="flex flex-1 flex-col">
       <header className="px-5 py-3.5 border-b border-white/10 bg-slate-950/40 backdrop-blur flex items-center gap-2 overflow-x-auto">
         <Utensils className="h-4 w-4 text-violet-400 flex-shrink-0" />
-        {MOCK_CATEGORIES.map((c, i) => (
-          <button
-            key={c}
-            type="button"
-            className={`touch-target flex-shrink-0 px-4 py-1.5 rounded-full text-sm font-medium transition ${
-              i === 0
-                ? 'bg-violet-600 text-white shadow-lg shadow-violet-900/40'
-                : 'bg-white/[0.04] text-slate-300 hover:bg-white/[0.08] hover:text-white border border-white/10'
-            }`}
-          >
-            {c}
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const active = tab.id === activeCategoryId;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveCategoryId(tab.id)}
+              className={`touch-target flex-shrink-0 px-4 py-1.5 rounded-full text-sm font-medium transition ${
+                active
+                  ? 'bg-violet-600 text-white shadow-lg shadow-violet-900/40'
+                  : 'bg-white/[0.04] text-slate-300 hover:bg-white/[0.08] hover:text-white border border-white/10'
+              }`}
+            >
+              {tab.name}
+            </button>
+          );
+        })}
       </header>
 
-      <div className="flex-1 overflow-y-auto p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 auto-rows-max">
-        {MOCK_ITEMS.map((it) => (
-          <button
-            key={it.id}
-            type="button"
-            className="touch-target group relative text-left p-4 bg-white/[0.04] backdrop-blur-sm rounded-2xl border border-white/10 hover:border-violet-400/60 hover:bg-white/[0.08] hover:shadow-xl hover:shadow-violet-900/30 hover:-translate-y-0.5 transition-all duration-200 min-h-[140px] flex flex-col"
-          >
-            <div className="absolute top-3 right-3 h-8 w-8 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-              <Plus className="h-4 w-4" />
-            </div>
-            <div className="font-semibold text-white text-base leading-snug mb-2 line-clamp-2 pr-10">
-              {it.name}
-            </div>
-            <div className="mt-auto flex items-end justify-between">
-              <div className="text-xl font-bold bg-gradient-to-r from-violet-300 to-indigo-300 bg-clip-text text-transparent">
-                {it.price.toFixed(2)}
-                <span className="text-xs font-medium text-slate-400 ml-1">RON</span>
-              </div>
-            </div>
-          </button>
-        ))}
-      </div>
+      {visibleProducts.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center p-10">
+          <EmptyHint
+            label={hydrated ? 'Niciun produs în această categorie' : 'Se încarcă…'}
+            sub={hydrated && products.length === 0 ? 'Verifică /api/pos/bootstrap.' : null}
+          />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 auto-rows-max">
+          {visibleProducts.map((p) => <ProductCard key={p.id} p={p} />)}
+        </div>
+      )}
     </section>
+  );
+}
+
+function ProductCard({ p }: { p: ProductRow }) {
+  return (
+    <button
+      type="button"
+      className="touch-target group relative text-left p-4 bg-white/[0.04] backdrop-blur-sm rounded-2xl border border-white/10 hover:border-violet-400/60 hover:bg-white/[0.08] hover:shadow-xl hover:shadow-violet-900/30 hover:-translate-y-0.5 transition-all duration-200 min-h-[140px] flex flex-col"
+    >
+      <div className="absolute top-3 right-3 h-8 w-8 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+        <Plus className="h-4 w-4" />
+      </div>
+      <div className="font-semibold text-white text-base leading-snug mb-2 line-clamp-2 pr-10">
+        {p.name}
+      </div>
+      <div className="mt-auto flex items-end justify-between">
+        <div className="text-xl font-bold bg-gradient-to-r from-violet-300 to-indigo-300 bg-clip-text text-transparent">
+          {(p.price_cents / 100).toFixed(2)}
+          <span className="text-xs font-medium text-slate-400 ml-1">RON</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function EmptyHint({ label, sub }: { label: string; sub?: string | null }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center text-slate-400 text-sm gap-2">
+      <Utensils className="h-8 w-8 text-slate-600" />
+      <p>{label}</p>
+      {sub && <p className="text-[11px] text-slate-500">{sub}</p>}
+    </div>
   );
 }
 

@@ -14,9 +14,11 @@ import { createInMemorySyncTransport } from './inMemoryTransport';
 import { createHttpSyncTransport } from './httpTransport';
 import { configureDispatch } from './dispatch';
 import { startBootstrapScheduler, type BootstrapScheduler } from './bootstrapScheduler';
-import { runBootstrap } from './runBootstrap';
+import { runBootstrap, type RunBootstrapResult } from './runBootstrap';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
+
+type BootstrapListener = (r: RunBootstrapResult) => void;
 
 export interface SyncEngine {
   store: EventStore;
@@ -24,6 +26,9 @@ export interface SyncEngine {
   transport: SyncTransport;
   exec: SqlExecutor;
   bootstrapScheduler: BootstrapScheduler;
+  /** Subscribe to every bootstrap attempt (foreground + scheduled).
+   * Returns an unsubscribe function. */
+  onBootstrapResult: (fn: BootstrapListener) => () => void;
   stop: () => void;
 }
 
@@ -62,21 +67,34 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
   // first hydrate runs in the foreground so the menu pane has data
   // before the operator opens it; failures don't block the engine from
   // coming up — the cached SQLite stays the source of truth.
+  const listeners = new Set<BootstrapListener>();
+  const broadcast = (r: RunBootstrapResult) => {
+    for (const fn of listeners) {
+      try { fn(r); } catch { /* swallow — keep other listeners running */ }
+    }
+  };
   const cfg = getConfig();
   if (cfg.syncTransportMode === 'http') {
-    void runBootstrap({ exec, restaurantId: cfg.restaurantId });
+    void runBootstrap({ exec, restaurantId: cfg.restaurantId }).then(broadcast);
   }
   const bootstrapScheduler = startBootstrapScheduler({
     exec,
     restaurantId: cfg.restaurantId,
     isOnline: () => cfg.syncTransportMode === 'http',
+    onResult: broadcast,
   });
+
+  const onBootstrapResult: SyncEngine['onBootstrapResult'] = (fn) => {
+    listeners.add(fn);
+    return () => { listeners.delete(fn); };
+  };
 
   const stop = () => {
     stopWorker();
     bootstrapScheduler.stop();
+    listeners.clear();
   };
-  _engine = { store, worker, transport, exec, bootstrapScheduler, stop };
+  _engine = { store, worker, transport, exec, bootstrapScheduler, onBootstrapResult, stop };
   return _engine;
 }
 
