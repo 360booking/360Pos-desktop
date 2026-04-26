@@ -14,12 +14,18 @@ import { useCatalog } from '@/store/catalog';
 import { useRecovery } from '@/store/recovery';
 import { useRemote } from '@/store/remote';
 import { useAuthStore } from '@/store/auth';
-import { getSyncEngine } from '@/lib/sync/bootstrap';
+import {
+  getSyncEngine,
+  isHydrating,
+  readBootstrapAttempts,
+  readSchedulersStarted,
+} from '@/lib/sync/bootstrap';
 import { readLastHealth } from '@/lib/api/healthLast';
 import {
   readLastBootstrap,
   readLastBootstrapRestaurantId,
 } from '@/lib/sync/lastBootstrap';
+import { executorPendingDepth } from '@/lib/db/tauriExecutor';
 
 export interface DiagnosticsSnapshot {
   // ─── App / config ─────────────────────────────────────────────────
@@ -85,6 +91,18 @@ export interface DiagnosticsSnapshot {
   localTablesCount: number;
   localOpenOrdersCount: number;
   localKitchenTicketsCount: number;
+
+  // ─── DB serialisation + bootstrap state (Sprint 10 / F) ───────────
+  /** Number of pending operations in the executor's FIFO mutex. */
+  dbQueueDepth: number;
+  /** Whether the initial hydrate is currently running. */
+  bootstrapInProgress: boolean;
+  /** Total bootstrap attempts since the engine started (incl. retries). */
+  bootstrapAttemptCount: number;
+  /** Whether outbox/pull/heartbeat schedulers have been started yet. */
+  schedulersStarted: boolean;
+  /** Filename only — full path lives at %APPDATA%\360booking-pos\. */
+  sqlitePath: string;
 
   // ─── Local DB ─────────────────────────────────────────────────────
   /** Filename only (full path lives at %APPDATA%\360booking-pos\). */
@@ -198,6 +216,12 @@ export function snapshot(): DiagnosticsSnapshot {
     localTablesCount: cat.tables.length,
     localOpenOrdersCount: rem.orders.length,
     localKitchenTicketsCount: rem.tickets.length,
+
+    dbQueueDepth: executorPendingDepth(engine?.exec ?? null),
+    bootstrapInProgress: isHydrating(),
+    bootstrapAttemptCount: readBootstrapAttempts(),
+    schedulersStarted: readSchedulersStarted(),
+    sqlitePath: '%APPDATA%\\360booking-pos\\pos-desktop.db',
 
     sqliteDbName: 'pos-desktop.db',
 

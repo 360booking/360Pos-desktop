@@ -3,11 +3,24 @@
  *
  * In a non-Tauri preview (plain `pnpm dev`), the SQLite plugin is
  * unavailable; we return null components so the UI still renders.
+ *
+ * Sprint 10 / F — the startup order MATTERS:
+ *   1) initial bootstrap hydrate (single big BEGIN/COMMIT) runs FIRST,
+ *      synchronously awaited, so SQLite is not contended;
+ *   2) only after hydrate completes do we spin up the outbox worker,
+ *      pull scheduler and heartbeat — these write to the DB on their
+ *      own ticks, and overlapping them with hydrate caused the
+ *      "database is locked" pilot bug.
+ *
+ * The tauriExecutor in turn serialises every operation through a
+ * single FIFO mutex, so even after startup overlapping callers can't
+ * race. Belt + braces.
  */
 import { tauriExecutor } from '@/lib/db/tauriExecutor';
 import { initDb } from '@/lib/db';
 import { getApiClient } from '@/lib/api/client';
 import { getConfig } from '@/lib/config';
+import { logger } from '@/lib/logger';
 import { createEventStore, type EventStore } from './eventStore';
 import { createOutboxWorker, type OutboxWorker } from './outboxWorker';
 import { createInMemorySyncTransport } from './inMemoryTransport';
@@ -61,6 +74,61 @@ export interface StartSyncEngineOptions {
   restaurantId?: string | null;
 }
 
+const HYDRATE_RETRY_BACKOFF_MS = [250, 750, 1500];
+
+function isLockedError(err: unknown): boolean {
+  const msg = String((err as { message?: unknown })?.message ?? err ?? '');
+  return /database is locked|\(code: ?5\)|SQLITE_BUSY/i.test(msg);
+}
+
+/** Run the initial bootstrap with up to 3 retries on SQLite-locked
+ *  errors. Other failures bubble up after the first attempt. */
+async function runInitialBootstrapWithRetry(
+  exec: SqlExecutor,
+  restaurantId: string | null,
+  broadcast: (r: RunBootstrapResult) => void,
+): Promise<RunBootstrapResult> {
+  let last: RunBootstrapResult = { ok: false, error: new Error('not_attempted') };
+  for (let attempt = 0; attempt <= HYDRATE_RETRY_BACKOFF_MS.length; attempt += 1) {
+    last = await runBootstrap({ exec, restaurantId });
+    bumpAttempts();
+    if (last.ok) {
+      broadcast(last);
+      return last;
+    }
+    if (!isLockedError(last.error) || attempt === HYDRATE_RETRY_BACKOFF_MS.length) {
+      broadcast(last);
+      return last;
+    }
+    const wait = HYDRATE_RETRY_BACKOFF_MS[attempt];
+    logger.warn('sync', 'bootstrap hydrate locked — retrying', {
+      attempt: attempt + 1,
+      waitMs: wait,
+    });
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  broadcast(last);
+  return last;
+}
+
+let _bootstrapAttempts = 0;
+function bumpAttempts(): void {
+  _bootstrapAttempts += 1;
+}
+export function readBootstrapAttempts(): number {
+  return _bootstrapAttempts;
+}
+
+let _hydrating = false;
+export function isHydrating(): boolean {
+  return _hydrating;
+}
+
+let _schedulersStarted = false;
+export function readSchedulersStarted(): boolean {
+  return _schedulersStarted;
+}
+
 export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promise<SyncEngine | null> {
   if (_engine) return _engine;
   if (!isTauri()) return null;
@@ -74,34 +142,42 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     transport,
     now: () => new Date().toISOString(),
   });
-  const stopWorker = worker.start(2_000);
   configureDispatch({ store, now: () => new Date().toISOString() });
 
-  // Sprint 4 / 1: hydrate the local catalogue from /api/pos/bootstrap on
-  // startup, then keep it fresh with a 30-minute background tick. The
-  // first hydrate runs in the foreground so the menu pane has data
-  // before the operator opens it; failures don't block the engine from
-  // coming up — the cached SQLite stays the source of truth.
   const listeners = new Set<BootstrapListener>();
+  const cfg = getConfig();
+  // Caller-supplied restaurantId (from login picker) wins over
+  // auth-store selection, which itself wins over the config-baked
+  // value (always null in tenant builds).
+  const { useAuthStore } = await import('@/store/auth');
+  const authRestaurantId = useAuthStore.getState().selectedRestaurant?.id ?? null;
+  const restaurantId = opts.restaurantId ?? authRestaurantId ?? cfg.restaurantId;
+
   const broadcast = (r: RunBootstrapResult) => {
     rememberBootstrap(r, restaurantId ?? null);
     for (const fn of listeners) {
       try { fn(r); } catch { /* swallow — keep other listeners running */ }
     }
   };
-  const cfg = getConfig();
-  // Sprint 10: caller-supplied restaurantId (from login picker) wins over
-  // the auth-store selection, which itself wins over the config-baked
-  // value (now always null in tenant builds). Defence in depth — if any
-  // future caller starts the engine without an explicit option, we still
-  // pick up the user's actual restaurant from the auth store rather
-  // than the empty cfg default.
-  const { useAuthStore } = await import('@/store/auth');
-  const authRestaurantId = useAuthStore.getState().selectedRestaurant?.id ?? null;
-  const restaurantId = opts.restaurantId ?? authRestaurantId ?? cfg.restaurantId;
+
+  // STEP 1: serial initial hydrate. Workers + pull do NOT start until
+  // this completes (or definitively fails). Running them concurrently
+  // is what triggered the "database is locked" pilot bug, even with
+  // the JS-side mutex — the mutex serialises calls but the long
+  // hydrate transaction would still backpressure pull/outbox writes
+  // for several seconds.
   if (cfg.syncTransportMode === 'http') {
-    void runBootstrap({ exec, restaurantId }).then(broadcast);
+    _hydrating = true;
+    try {
+      await runInitialBootstrapWithRetry(exec, restaurantId, broadcast);
+    } finally {
+      _hydrating = false;
+    }
   }
+
+  // STEP 2: now safe to start the periodic workers.
+  const stopWorker = worker.start(2_000);
+
   const bootstrapScheduler = startBootstrapScheduler({
     exec,
     restaurantId,
@@ -114,19 +190,12 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     return () => { listeners.delete(fn); };
   };
 
-  // Sprint 6 / 3: pull scheduler runs every 8s, broadcasts results so
-  // the catalog/remote-orders stores can refresh on each tick. The
-  // bootstrap scheduler keeps doing its 30-min refresh; the pull is
-  // the live channel for orders + kitchen tickets.
   const pullListeners = new Set<PullListener>();
   const broadcastPull = (r: RunPullResult) => {
     for (const fn of pullListeners) {
       try { fn(r); } catch { /* swallow */ }
     }
   };
-  // Kick a pull on startup so TablesPane sees the open tabs immediately,
-  // not eight seconds in. Push runs before pull on reconnect; on first
-  // start the outbox is empty so we just pull.
   if (cfg.syncTransportMode === 'http') {
     void runPull({ exec }).then(broadcastPull);
   }
@@ -140,11 +209,11 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     return () => { pullListeners.delete(fn); };
   };
 
-  // Sprint 8 — heartbeat scheduler keeps locks renewed for orders we
-  // own and lets the backend track device liveness. Skipped offline.
   const heartbeatScheduler = startHeartbeatScheduler({
     isOnline: () => cfg.syncTransportMode === 'http',
   });
+
+  _schedulersStarted = true;
 
   const stop = () => {
     stopWorker();
@@ -153,6 +222,7 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     heartbeatScheduler.stop();
     listeners.clear();
     pullListeners.clear();
+    _schedulersStarted = false;
   };
   _engine = {
     store,

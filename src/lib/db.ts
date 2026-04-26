@@ -32,6 +32,12 @@ export async function initDb(): Promise<Database> {
       await db.execute('PRAGMA journal_mode = WAL;');
       await db.execute('PRAGMA foreign_keys = ON;');
       await db.execute('PRAGMA synchronous = NORMAL;');
+      // Sprint 10 / F: belt + braces with the JS-side mutex in
+      // tauriExecutor. busy_timeout makes SQLite wait up to 5s for a
+      // contended lock before erroring; the JS retry on top covers
+      // cases where the underlying sqlx driver returns BUSY before the
+      // pragma kicks in.
+      await db.execute('PRAGMA busy_timeout = 5000;');
       return db;
     });
   }
