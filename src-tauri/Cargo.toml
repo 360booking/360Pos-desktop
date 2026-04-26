@@ -1,0 +1,28 @@
+[package]
+name = "pos-desktop"
+version = "0.1.0"
+description = "360booking POS — Windows desktop app"
+authors = ["360booking"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "pos_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Bundles the (optional, vendor-restricted) production fiscal sidecar.
+# Public builds leave this disabled and ship simulators only.
+fiscal-bridge = []

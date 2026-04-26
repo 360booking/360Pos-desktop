@@ -1,0 +1,68 @@
+/**
+ * Global styles for the POS desktop app.
+ * Mirrors frontend/src/styles/globals.css so the visual diff with the
+ * web POS stays auditable. Any divergence belongs in docs/pos-ui-parity.md.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+}
+
+html,
+body {
+  overflow: hidden; /* desktop POS is a fixed app shell, no body scroll */
+}
+
+#root {
+  height: 100vh;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none; /* POS app — no accidental selection on touch */
+}
+
+/* Touch-friendly minimum hit area for any element marked .touch-target */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Disable native browser drag-image / outline noise */
+img {
+  -webkit-user-drag: none;
+}
+button,
+[role='button'] {
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Ready-flash keyframe used by the toasts in PosShell, ported from POSPage. */
+@keyframes slideInRight {
+  from {
+    transform: translateX(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}

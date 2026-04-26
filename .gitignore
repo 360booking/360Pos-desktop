@@ -1,0 +1,35 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+src-tauri/Cargo.lock
+
+# Local config (never commit real backend URLs / IDs)
+config.json
+.env
+.env.local
+.env.*.local
+
+# Private adapter sources (NEVER ship publicly)
+private-adapters/
+sidecars/*.exe
+sidecars/*.dll
+*.pem
+*.pfx
+*.crt
+*.key
+
+# Editor / OS noise
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

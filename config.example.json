@@ -1,0 +1,17 @@
+{
+  "$comment": "Copy to %APPDATA%/360booking-pos/config.json on Windows. NO secrets in this file.",
+  "backendUrl": "http://localhost:8000",
+  "tenantId": null,
+  "tenantSlug": null,
+  "restaurantId": null,
+  "deviceId": null,
+  "fiscalAdapter": "simulator",
+  "paymentAdapter": "simulator",
+  "printerAdapter": "simulator",
+  "fiscalComPort": null,
+  "paymentComPort": null,
+  "printerComPort": null,
+  "simulatorMode": true,
+  "buildProfile": "demo",
+  "syncTransportMode": "memory"
+}

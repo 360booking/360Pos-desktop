@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities granted to the POS desktop window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "shell:allow-open",
+    "sql:default",
+    {
+      "identifier": "sql:allow-execute",
+      "allow": [{ "name": "sqlite:pos-desktop.db" }]
+    },
+    {
+      "identifier": "sql:allow-load",
+      "allow": [{ "name": "sqlite:pos-desktop.db" }]
+    }
+  ]
+}

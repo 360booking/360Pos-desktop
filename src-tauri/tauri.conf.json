@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "360booking POS",
+  "version": "0.1.0",
+  "identifier": "com.x360booking.pos",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "360booking POS",
+        "width": 1366,
+        "height": 820,
+        "minWidth": 1280,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "alwaysOnTop": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://localhost:* https://*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "360booking",
+    "category": "Business",
+    "shortDescription": "360booking POS — Windows",
+    "longDescription": "Windows POS for 360booking restaurants. Offline-first with local SQLite, Datecs fiscal printer support via sidecar, ESC/POS kitchen printers, and card terminal integration.",
+    "windows": {
+      "wix": { "language": ["en-US", "ro-RO"] },
+      "nsis": { "displayLanguageSelector": true, "languages": ["English", "Romanian"] }
+    }
+  },
+  "plugins": {}
+}
