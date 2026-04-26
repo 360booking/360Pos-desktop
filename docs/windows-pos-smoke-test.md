@@ -187,12 +187,135 @@ Audited 2026-04-26 in `src-tauri/tauri.conf.json` and `src-tauri/capabilities/de
 | `app.security.csp` | ✅ default-src 'self' + connect-src https://* | tight |
 | `capabilities/default.json` | ✅ `core:default`, `log:default`, `shell:allow-open`, `sql:*` for `sqlite:pos-desktop.db` | no serialport / no fiscal-bridge sidecar permissions yet — correct for Sprint 9.5 (no real hardware) |
 | Sidecar Datecs | ✅ NOT auto-launched | `fiscal_bridge_status` command only checks file presence; never spawns |
-| **Icons** | ⚠ **BLOCKER for MSI build** | `src-tauri/icons/` is empty. `tauri.conf.json` references `icons/32x32.png`, `icons/128x128.png`, `icons/icon.ico` but the files don't exist on disk. `pnpm tauri build` will fail until icons are added. `pnpm tauri dev` works without them. |
+| Adapter wiring | ✅ all branches resolve to simulator in `src/adapters/index.ts` | demo build cannot start a real Datecs / BT POS / ESC/POS device — every `case 'datecs' / 'bt-ecr' / 'escpos'` falls through to the simulator class |
+| Default `simulatorMode` | ✅ `true` for `POS_BUILD_PROFILE=demo` (the `tauri:build:demo` script) | flipped to `false` only when `POS_BUILD_PROFILE=tenant` is set explicitly |
+| **Icons** | ✅ placeholder set in `src-tauri/icons/` | `32x32.png`, `128x128.png`, `icon.ico` plus the full Windows-Store square set generated 2026-04-26. Marked **TEMPORARY** in `src-tauri/icons/README.md` — replace with real brand artwork before Sprint 10 public release. |
 
 Action items before MSI distribution:
-- [ ] Place `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, `icon.ico` under `src-tauri/icons/`. The Tauri docs have a generator: `npx @tauri-apps/cli icon path/to/source-1024.png`.
+- [ ] Replace placeholder icons (see `src-tauri/icons/README.md`) with the final brand artwork.
 - [ ] Bump `productVersion` on every public installer.
 - [ ] Verify the publisher field matches the signing certificate (for code-signed releases — Sprint 11+).
+
+## 12.5 Sprint 9.6 — pre-Windows-test readiness
+
+Verified on Linux on 2026-04-26 (build artefacts only — Tauri shell itself
+still has to be exercised on Windows in section 11):
+
+| Check | Command | Expected | Last result |
+|---|---|---|---|
+| TypeScript compile | `cd /opt/360booking/pos-desktop && npx tsc --noEmit` | exit 0, no diagnostics | ✅ exit 0 |
+| Vite production build | `cd /opt/360booking/pos-desktop && npx vite build` | `dist/` written, no errors | ✅ 1841 modules, ~2 s |
+| Vitest suite | `cd /opt/360booking/pos-desktop && npx vitest run` | all green | ✅ 130/130 in 17 files |
+| Icons present | `ls src-tauri/icons/{32x32.png,128x128.png,icon.ico}` | three files exist | ✅ placeholder set |
+
+What is **not** verified on Linux and must be re-checked on Windows:
+- `pnpm tauri dev` opening the WebView2 shell.
+- `pnpm tauri build` producing a working MSI / NSIS under `src-tauri/target/release/bundle/`.
+- SQLite plugin migrations against `%APPDATA%\360booking-pos\pos-desktop.db`.
+- `fiscal_bridge_status` Tauri command.
+
+## 12.55 Build the MSI in CI instead of locally
+
+If the tester does not have Rust + MSVC + WebView2 installed, the CI workflow
+at `.github/workflows/pos-desktop-windows.yml` produces the same demo MSI on a
+GitHub-hosted `windows-latest` runner. Use this for the *first* test pass —
+fall back to a local `pnpm tauri build` only when iterating on adapter code.
+
+How to start it:
+
+1. github.com → repo → **Actions** tab → **`pos-desktop-windows-demo`**.
+2. **Run workflow** → branch → **Run workflow**.
+3. ~10–15 min cold, ~5 min warm.
+4. Run page → **Artifacts** → download **`360booking-pos-windows-demo`** (zip).
+5. Unzip → `msi/*.msi` and `nsis/*.exe` are inside.
+
+What the workflow runs (per `.github/workflows/pos-desktop-windows.yml`):
+
+```
+npm ci  (or pnpm install --frozen-lockfile)
+npx tsc --noEmit
+npx vitest run
+npx vite build
+npx @tauri-apps/cli build      # POS_BUILD_PROFILE=demo
+                               # VITE_SYNC_TRANSPORT_MODE=memory
+                               # VITE_BACKEND_URL=https://360booking.ro
+```
+
+CI build hard limits (do not relax without a separate ticket):
+
+- Demo profile only — adapter registry resolves every `case` to the simulator.
+- No GitHub Secrets consumed → no tokens / device JWTs / ANAF creds in the bundle.
+- Artifact retention: 14 days.
+- Artifact is **not** auto-promoted to a GitHub Release — distribution waits for the Sprint 11 signing pipeline.
+
+Treat any MSI from this workflow as **pilot test only**.
+
+## 12.6 Windows handoff — what the tester runs and reports
+
+> Goal of this section: a tester who has never touched the repo can copy-paste,
+> run, and report results without pinging the dev team.
+
+### Ce rulez pe Windows (in order)
+
+1. **Preflight** — section 0.5 above, top to bottom in PowerShell. Stop at the first failing line and jump to "Ce copiez dacă apare eroare".
+2. **Clone + install** — section 1.
+3. **Configure `.env`** — section 2 (use the tenant slug + restaurant UUID handed over for the pilot).
+4. **Dev shell** — `pnpm tauri dev` (section 3). Window must open within ~30 s.
+5. **DB migrations** — section 4. Confirm migration version `5`.
+6. **Bootstrap hydration** — section 5.
+7. **Sync round-trip** — section 6.
+8. **Recovery tray (simulator)** — section 7.
+9. **Foreign-device claim** — section 8 (only if a second machine is available; otherwise skip and note it).
+10. **Kitchen queue** — section 9.
+11. **Heartbeat lock** — section 10.
+12. **Production build** — section 11. **This is the first time `pnpm tauri build` is exercised end-to-end**, so it is the most likely failure point.
+
+### Ce copiez dacă apare eroare
+
+For any failure, fill in the **section 13** "Failure capture template" and attach:
+
+- Full PowerShell scrollback of the failing command.
+- `%APPDATA%\360booking-pos\pos-desktop.db` snapshot if the failure is data-shaped (`sqlite3 ... .dump`).
+- DiagnosticsModal snapshot (if the shell opened at all).
+- Screenshot of the StatusBar.
+
+Special cases:
+
+- **`pnpm tauri build` icon error** — should not happen anymore (placeholder set is in `src-tauri/icons/`), but if it does, paste the full Tauri build log; do not hand-edit `tauri.conf.json`.
+- **WebView2 missing** — `winget install Microsoft.EdgeWebView2Runtime`, then re-run preflight.
+- **Rust toolchain missing** — `rustup-init.exe` from rustup.rs, then `rustup default stable-x86_64-pc-windows-msvc`.
+
+### Ce rezultate aștept
+
+Per section, a green checkbox is the success signal. The hard gates for a "pilot ready" call:
+
+- Sections 3–6 all green → backend wiring is healthy.
+- Section 11 green → MSI installer actually builds and runs from Start Menu.
+- Sections 7, 9, 10 green → simulator + sync workers behave on the real OS.
+
+A "yellow" pilot (most things work, one of 7/9/10 flaky) is acceptable for a one-store soak as long as it is reported.
+
+### Când opresc testul
+
+Stop and report immediately if **any** of these happen:
+
+- Tauri shell crashes / Rust panic on launch.
+- SQLite migration error or `_sqlx_migrations` does not reach version 5.
+- `pnpm tauri build` fails (after the icon fix). The MSI is the deliverable.
+- Backend `Bootstrap` cell stays red for > 30 s (likely network / TLS / token issue).
+- Any operation accidentally engages real hardware (printer / fiscal / card terminal). The demo profile should make this impossible — if it happens, file a P0.
+
+Otherwise, run the full checklist top to bottom and only then close out.
+
+### Ce NU testez încă
+
+Out of scope for this Windows pilot run — do **not** wire these even if the device is plugged in:
+
+- **Real Datecs fiscal printer.** Section 7 must use the simulator only. Real fiscal flow requires the ANAF/technician activation step tracked separately, plus the v0.3.4 fiscal-bridge `.exe` update on Ovidiu's PC.
+- **Real BT POS card terminal.** The adapter is still a Sprint 9 skeleton; `Retry` in the recovery tray is correctly disabled.
+- **Real ESC/POS kitchen printer.** Simulator only.
+- **ANAF e-Factura live submit.** Sprint 1 of e-Factura is per-tenant inbox only; live submit is later.
+- **Code-signed / notarised installer.** Sprint 11+. The MSI from section 11 will trigger Windows SmartScreen warnings — that is expected.
 
 ## 13. Failure capture template
 

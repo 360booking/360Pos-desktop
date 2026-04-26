@@ -28,9 +28,51 @@ pnpm dev                # opens http://localhost:1420
 
 ```bash
 pnpm tauri:build:demo   # MSI + NSIS, simulator adapters only
+# equivalent: cross-env POS_BUILD_PROFILE=demo tauri build
 ```
 
-Output: `src-tauri/target/release/bundle/{msi,nsis}/`. The demo profile is the default; the `tenant` profile (private adapters) is documented in `docs/github-public-release.md` and is only buildable from a private fork.
+Artefacts (after a successful Windows build):
+
+- `src-tauri/target/release/bundle/msi/360booking POS_<version>_x64_en-US.msi`
+- `src-tauri/target/release/bundle/nsis/360booking POS_<version>_x64-setup.exe`
+- Unpacked binary: `src-tauri/target/release/360booking POS.exe`
+
+The demo profile is the default — every adapter (`fiscal` / `payment` / `printer`) resolves to the simulator class in `src/adapters/index.ts`, so a demo MSI **cannot** drive a real Datecs printer, BT POS terminal, or ESC/POS kitchen printer even if the COM port is configured. The `tenant` profile (private adapters) is documented in `docs/github-public-release.md` and is only buildable from a private fork.
+
+> **Icons are placeholders.** `src-tauri/icons/` ships a generic dark-blue
+> "POS" wordmark so the build does not abort. Replace with the final brand
+> artwork before any public release — see `src-tauri/icons/README.md`.
+
+> **Windows-only build.** `pnpm tauri build` cannot produce an MSI / NSIS from
+> Linux; it must run on Windows with the WebView2 runtime + MSVC build tools.
+> See `docs/windows-pos-smoke-test.md` § 0.5 for the preflight and § 11–12 for
+> the full Windows checklist.
+
+### Build via GitHub Actions (no Windows machine needed)
+
+The repo ships a `windows-latest` workflow at
+`.github/workflows/pos-desktop-windows.yml` that builds a demo / simulator-only
+MSI + NSIS and uploads them as a workflow artifact.
+
+How to start it:
+
+1. Open the repo on github.com → **Actions** tab.
+2. Pick the **`pos-desktop-windows-demo`** workflow on the left.
+3. Click **Run workflow** → choose the branch → **Run workflow**.
+4. Wait for the green check (~10–15 min on a cold cache, ~5 min warm).
+5. Open the run → scroll to **Artifacts** → download
+   **`360booking-pos-windows-demo`**. The zip contains both
+   `msi/*.msi` and `nsis/*.exe`.
+
+The workflow is also triggered automatically on push to any branch when files
+outside `**/*.md` / `docs/**` change.
+
+**Hard limits of the CI build** (by design):
+
+- `POS_BUILD_PROFILE=demo` and `VITE_SYNC_TRANSPORT_MODE=memory` are baked in.
+- No GitHub Secrets are consumed; nothing tenant-specific is bundled.
+- The MSI is for **pilot testing only** — never auto-published as a Release.
+  Distribution of a real installer goes through the Sprint 11 signing flow.
 
 ## Architecture
 
@@ -77,10 +119,15 @@ VITE_SYNC_TRANSPORT_MODE=http VITE_BACKEND_URL=http://localhost:8000 pnpm tauri:
 
 ```bash
 cd /opt/360booking/pos-desktop
-npx vitest run                  # 96 tests
+npx vitest run                  # 130 tests (Sprint 9.6)
 npx vitest run --coverage       # plus coverage report
 npx tsc --noEmit                # type-check
+npx vite build                  # client-side production bundle (no Tauri shell)
 ```
+
+These four commands are the **Linux-side green-light** for a Windows build —
+all four must pass before kicking off `pnpm tauri build` on a Windows box.
+Last verified green: 2026-04-26 (130/130 vitest, tsc clean, vite build OK).
 
 ## What works in Sprint 0
 

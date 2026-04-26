@@ -1,0 +1,134 @@
+name: pos-desktop-windows-demo
+
+# Build a Windows MSI / NSIS installer of the POS desktop in **demo /
+# simulator mode**. No secrets, no real Datecs, no real BT POS, no real
+# ESC/POS printer, no ANAF live submit. The MSI is for pilot testing only —
+# it is published as a workflow artifact, NOT as a GitHub Release.
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "**"
+      - ".github/workflows/pos-desktop-windows.yml"
+      - "!**/*.md"
+      - "!docs/**"
+
+concurrency:
+  group: pos-desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows demo build
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      # Demo / simulator-only profile — adapter registry resolves every
+      # branch (datecs / bt-ecr / escpos) to the simulator class, so this
+      # MSI cannot drive real hardware even with a COM port configured.
+      POS_BUILD_PROFILE: demo
+      VITE_SYNC_TRANSPORT_MODE: memory
+      # Backend URL is harmless to bake in — it's a public production host.
+      # No tokens / credentials / device JWTs are written into the bundle.
+      VITE_BACKEND_URL: https://360booking.ro
+      # Stop tauri-build from prompting / opening editors.
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Resolve pnpm store path
+        id: pnpm-cache
+        shell: pwsh
+        run: |
+          "STORE_PATH=$(pnpm store path --silent)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml', 'package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache cargo target (best-effort)
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Install JS dependencies
+        # The repo currently has package-lock.json (npm), not pnpm-lock.yaml.
+        # Use whichever lockfile is present, preferring pnpm if both exist.
+        shell: pwsh
+        run: |
+          if (Test-Path "pnpm-lock.yaml") {
+            pnpm install --frozen-lockfile
+          } else {
+            npm ci
+          }
+
+      - name: Type-check
+        shell: pwsh
+        run: npx tsc --noEmit
+
+      - name: Run unit tests
+        shell: pwsh
+        run: npx vitest run
+
+      - name: Vite production build
+        shell: pwsh
+        run: npx vite build
+
+      - name: Tauri build (MSI + NSIS, demo profile)
+        shell: pwsh
+        run: npx @tauri-apps/cli build
+
+      - name: List build output
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Path src-tauri/target/release/bundle -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: 360booking-pos-windows-demo
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
