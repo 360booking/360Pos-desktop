@@ -177,3 +177,37 @@ On top of the existing manual + first-launch refreshes, the desktop runs a backg
 5. **Refresh failure.** A failing refresh does not interrupt the POS; the UI surfaces a yellow `Bootstrap stale` indicator and falls back to the cached SQLite snapshot.
 
 The first version uses full-bootstrap refresh (idempotent UPSERT into the local catalogue tables). When `/api/pos/sync/pull?since=cursor` ships its real diff (Sprint 8/9), the 30-minute cadence switches to delta pull and full bootstrap becomes a defensive fallback only.
+
+---
+
+## Sprint 6 — pull is live
+
+`/api/pos/sync/pull?since=<iso>` is no longer a stub. It's the live read
+channel for orders + kitchen tickets, separate from the catalogue
+refresh which still runs through `/api/pos/bootstrap`.
+
+**Push-then-pull on reconnect.** When the desktop comes back online,
+the engine kicks the outbox first (so the desktop's own writes land
+on the backend) and *then* runs `pullScheduler.runNow()` (so the
+read snapshot includes everything we just wrote). Every 8 seconds
+the scheduler ticks again with the same order. A pull failure is a
+no-op — the cached SQLite snapshot stays the source of truth and the
+next tick retries.
+
+**Foreign-device read-only.** Any order whose `tableId` matches a
+table the operator hasn't claimed locally renders in `TablesPane`
+with a `Lock` badge. Reading is fine; writing is intentionally
+blocked at the pos-core action layer (`assertOwnedLocally`). Sprint 7
+adds server-side lock acquisition so a waiter at another station can
+explicitly take over a table, with a clean UI.
+
+**Kitchen tickets are a full-replace each pull.** The model has no
+`updated_at` so the backend ships every active ticket and the desktop
+deletes-and-reinserts the local cache on each pull. ~200 rows max per
+restaurant during service is fine; an `updated_at` column lands when
+Sprint 8 / KDS sync needs it.
+
+**Cursor persistence.** The cursor lives in
+`settings.sync.pull.cursor` so a desktop restart picks up where it
+left off; if the cursor is missing the desktop falls back to a cold
+snapshot, which is identical to the first-launch case.

@@ -170,8 +170,9 @@ The tier-1 list is too large for a single sprint. Suggested slicing:
 |---|---|---|
 | 5 ✅ | Inline quantity stepper + per-item void; Trimite / Trimite-update / Trimis state machine; SENT_TO_KITCHEN forwarder | Shipped 2026-04-26 |
 | 5 ✅ | Per-table elapsed time + running total | Shipped 2026-04-26 (read from `useCurrentOrder`; multi-table sync = Sprint 6) |
-| 6 | Walk-in `SourceSection`s + new-order sheet + delivery sheet | The whole "non-table" intake surface |
-| 6 | KitchenQueueStrip | Read-only display, but needs a kitchen tickets feed |
+| 6 ✅ | KitchenQueueStrip | Shipped 2026-04-26 — read-only strip above panes, fed by /api/pos/sync/pull |
+| 6 ✅ | Open-tabs / multi-table visibility | Shipped 2026-04-26 — TablesPane shows orders from other devices with a lock badge |
+| 7 | Walk-in `SourceSection`s + new-order sheet + delivery sheet | Deferred from Sprint 6; rolls into the payment sprint |
 | 7 | Payment modal + Card-POS confirmation + payment-link flow | Pairs with the BT POS adapter |
 | 8 | Fiscal order panel | Pairs with the Datecs adapter |
 | 11 | Notification bell + ready-from-kitchen toasts | Polish |
@@ -198,6 +199,38 @@ Pos-core additions:
 - `OrderItemAddedPayload` gains `localItemId` so the backend can resolve later mutations on the same line. Existing tests still pass.
 
 Visual deltas remaining (Tier-1 leftovers): walk-in source sections, new-order/delivery sheets, kitchen queue strip, payment modal, card-POS confirmation, fiscal panel, notification bell. Allocations for these are unchanged in the table above.
+
+---
+
+## Sprint 6 closeout — 2026-04-26
+
+Closed in this sprint:
+
+- ~~`KitchenQueueStrip` — read-only display, needs a kitchen tickets feed~~. Shipped as `features/pos/KitchenQueueStrip.tsx`. Compact horizontal strip between StatusBar and the three panes; shows total pending + preparing per station, plus the oldest ticket age. Reads `useRemote.tickets` so it's automatically refreshed on every pull tick. No actions yet — the cook still uses the KDS app for status transitions.
+- ~~Open-tabs visibility~~. `TablesPane` now reads `useRemote.orders` and overlays foreign-device orders on the table grid. Each foreign card shows a small `Lock` icon plus the same status pill / total / elapsed time as a locally-active table. The local order always wins when both exist (the pull snapshot may lag the operator's own writes by a few seconds).
+
+New explicit deltas (Tier-3 — desktop-only, justified):
+
+| Delta | Reason | Where |
+|---|---|---|
+| `KitchenQueueStrip` between StatusBar and panes | Web POS already has it (POSPage.tsx), but desktop adds an even tighter form factor for touchscreens | `pos-desktop/src/features/pos/KitchenQueueStrip.tsx` |
+| Lock badge on foreign-device tables | Web POS doesn't show this because every browser is "the same client"; desktop has multiple stations writing to the same `restaurant_orders`, so ownership matters | `pos-desktop/src/features/pos/PosShell.tsx` `TableButton` |
+
+Backend additions:
+- `GET /api/pos/sync/pull?since=<iso>` is no longer a stub — returns `changes={orders, orderItems, kitchenTickets}` + `nextCursor` + `serverTime`. Open orders only on first contact; incremental on subsequent calls.
+- Five new pull tests cover: cold start (empty), open-order surfacing, incremental cursor filtering, closed-order exclusion on first contact, closed-order surfacing on incremental.
+
+Pos-desktop additions:
+- `src/sql/migrations/0003_remote_read_model.sql` — three new SQLite tables (`remote_orders`, `remote_order_items`, `remote_kitchen_tickets`).
+- `src-tauri/src/main.rs` registers migration v3.
+- `src/lib/api/pull.ts` — typed client.
+- `src/lib/sync/applyPull.ts` — UPSERT/DELETE merge into SQLite + cursor persistence.
+- `src/lib/sync/runPull.ts` — orchestrator that never throws.
+- `src/lib/sync/pullScheduler.ts` — 8-second interval with offline-skip + `runNow()`.
+- `src/store/remote.ts` — zustand slice exposing the cached snapshot.
+- 3 new vitest tests (`applyPull.test.ts`).
+
+Slice A (walk-in / delivery sheets) is **NOT** done — explicitly deferred per the user's decision (visibility prioritised over commercial intake). Rolled into Sprint 7 alongside the payment sprint.
 
 Each slice closes a row from this audit; when the row's deltas are gone, strike them from the Tier-1 list above.
 

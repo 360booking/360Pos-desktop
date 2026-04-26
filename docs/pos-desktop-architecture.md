@@ -262,6 +262,75 @@ The outer transaction is committed once, at the end of the `/api/pos/sync/push` 
 | `PAYMENT_REGISTERED` | ✅ Sprint 4 | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
 | `DISCOUNT_APPLIED`, `TIP_ADDED`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 6+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
 
+### Pull contract (Sprint 6)
+
+`GET /api/pos/sync/pull?since=<iso>` is the live read channel. Where push
+is the desktop telling the backend what changed locally, pull is the
+backend telling the desktop what other devices (and the web POS)
+changed remotely. The combo is run by `pullScheduler` every 8 seconds,
+and on reconnect the engine schedules push BEFORE pull so any pending
+local mutation lands first.
+
+Response shape:
+
+```jsonc
+{
+  "events": [],
+  "changes": {
+    "orders":         [ {id, tableId, status, paymentStatus, isOpen,
+                          subtotal, discountTotal, tipTotal, total,
+                          currency, source, openedAt, closedAt,
+                          sentToKitchenAt, updatedAt}, ... ],
+    "orderItems":     [ {id, orderId, menuItemId, name, quantity,
+                          unitPriceCents, lineTotalCents, vatRateBp,
+                          status, kitchenTicketId, roundNumber, sentAt}, ... ],
+    "kitchenTickets": [ {id, orderId, station, status,
+                          createdAt, seenAt, completedAt,
+                          preparationSeconds}, ... ]
+  },
+  "nextCursor": "2026-04-26T08:00:00.123456+00:00",
+  "serverTime": "2026-04-26T08:00:00.180000+00:00"
+}
+```
+
+Cursor strategy:
+- Cursor is a server-generated ISO-8601 timestamp echoed back unchanged.
+- `since=null` (no cursor): server returns only **open** orders + their
+  full items + the active kitchen-ticket set. This is the cold-start
+  snapshot a freshly-paired desktop sees.
+- `since=<iso>`: server returns rows whose `updated_at > cursor`,
+  including orders that just closed (so the cache can drop them).
+  Items: full per-order re-list when the order's `updated_at` advances
+  (any line edit bumps the parent's `updated_at` via
+  `_recalculate_totals`).
+- Kitchen tickets: full active set every pull. The ticket model has
+  no `updated_at` column, so a full re-list is the only honest answer
+  until Sprint 8 adds one. Acceptable cost: ≤200 rows per restaurant
+  during service.
+
+Merge rules on the desktop (`applyPullChanges`):
+- Orders UPSERT by `id`. `isOpen=false` triggers `DELETE FROM
+  remote_orders WHERE id = ?` so closed tabs disappear from the cache.
+- Items full-replace per order: `DELETE FROM remote_order_items WHERE
+  order_id = ?` then re-insert the rows the server shipped.
+- Kitchen tickets full-replace: `DELETE FROM remote_kitchen_tickets`
+  then re-insert. A ticket missing from the new batch has been
+  completed and should disappear.
+- Cursor persisted in `settings.sync.pull.cursor` so a restart picks
+  up where it left off.
+- The merge runs inside one SQLite transaction; partial failure
+  rolls back. The `events` / `sync_outbox` tables (the desktop's own
+  write side) are NEVER touched by a pull.
+
+Foreign-device read-only rule:
+- A remote order on a table that the operator hasn't claimed locally
+  shows up in `TablesPane` with a small lock badge. Tapping the table
+  is allowed (operator may want to inspect / pay), but writing to
+  that order from this desktop is intentionally blocked at the
+  pos-core action layer (`assertOwnedLocally` already enforces the
+  ownership check in offline mode; Sprint 6 documents the pattern,
+  Sprint 7 brings server-side lock acquisition for online takeover).
+
 ### Per-line server-id mapping (Sprint 5)
 
 `ORDER_ITEM_ADDED` carries `payload.localItemId` — the desktop's UUID

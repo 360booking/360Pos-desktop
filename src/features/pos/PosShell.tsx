@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
 import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
 import { StatusBar } from './StatusBar';
+import { KitchenQueueStrip } from './KitchenQueueStrip';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
+import { useRemote } from '@/store/remote';
 import type { ProductRow, TableRow } from '@/lib/db/catalogQueries';
+import type { RemoteOrderRow } from '@/lib/db/remoteQueries';
 import {
   computeTotals,
   formatMoney,
@@ -32,6 +35,7 @@ export function PosShell() {
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
       <StatusBar />
+      <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <TablesPane
           onPickTable={(id) => void actions.newOrder(id)}
@@ -107,9 +111,30 @@ const STATUS_DOT: Record<TableSlotStatus, string> = {
   paid: 'bg-slate-400',
 };
 
+function statusForRemote(o: RemoteOrderRow): TableSlotStatus {
+  if (o.payment_status === 'paid') return 'paid';
+  if (o.payment_status === 'partial') return 'partial';
+  if (o.status === 'sent' || o.status === 'preparing' || o.status === 'ready' || o.status === 'served') {
+    return 'sent';
+  }
+  // 'draft' or 'open' on a remote order: items present but not yet sent.
+  return o.status === 'draft' ? 'unsent' : 'open';
+}
+
 function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
   const tables = useCatalog((s) => s.tables);
   const hydrated = useCatalog((s) => s.hydrated);
+  const remoteOrders = useRemote((s) => s.orders);
+
+  // Map tableId → the remote order on it (if any). Backend ships only
+  // open orders so we don't need an is_open filter here.
+  const remoteByTable = useMemo(() => {
+    const m = new Map<string, RemoteOrderRow>();
+    for (const o of remoteOrders) {
+      if (o.table_id) m.set(o.table_id, o);
+    }
+    return m;
+  }, [remoteOrders]);
 
   return (
     <aside className="flex w-72 bg-slate-950/60 backdrop-blur border-r border-white/10 flex-col">
@@ -119,7 +144,7 @@ function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
         </h2>
         <p className="text-[11px] text-slate-400 mt-0.5">
           {tables.length > 0
-            ? `${tables.length} mese`
+            ? `${tables.length} mese${remoteOrders.length > 0 ? ` · ${remoteOrders.length} deschise` : ''}`
             : hydrated
               ? 'Niciun rând în catalog'
               : 'Se încarcă…'}
@@ -135,17 +160,44 @@ function TablesPane({ onPickTable, activeOrder, totals }: TablesPaneProps) {
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {tables.map((t) => {
-              const isActive = activeOrder?.tableId === t.id;
-              const status: TableSlotStatus = isActive
-                ? statusForActive(activeOrder!, totals)
-                : 'empty';
+              const isLocallyActive = activeOrder?.tableId === t.id;
+              const remote = remoteByTable.get(t.id);
+              // Local order wins if we own this table right now; the
+              // backend snapshot may be a few seconds stale.
+              if (isLocallyActive) {
+                return (
+                  <TableButton
+                    key={t.id}
+                    t={t}
+                    status={statusForActive(activeOrder!, totals)}
+                    totalCents={totals.totalCents}
+                    openedAtIso={activeOrder!.openedAt}
+                    isForeign={false}
+                    onPick={() => onPickTable(t.id)}
+                  />
+                );
+              }
+              if (remote) {
+                return (
+                  <TableButton
+                    key={t.id}
+                    t={t}
+                    status={statusForRemote(remote)}
+                    totalCents={remote.total_cents}
+                    openedAtIso={remote.opened_at}
+                    isForeign={true}
+                    onPick={() => onPickTable(t.id)}
+                  />
+                );
+              }
               return (
                 <TableButton
                   key={t.id}
                   t={t}
-                  status={status}
-                  totalCents={isActive ? totals.totalCents : null}
-                  openedAtIso={isActive ? activeOrder!.openedAt : null}
+                  status="empty"
+                  totalCents={null}
+                  openedAtIso={null}
+                  isForeign={false}
                   onPick={() => onPickTable(t.id)}
                 />
               );
@@ -184,10 +236,11 @@ interface TableButtonProps {
   status: TableSlotStatus;
   totalCents: number | null;
   openedAtIso: string | null;
+  isForeign: boolean;
   onPick: () => void;
 }
 
-function TableButton({ t, status, totalCents, openedAtIso, onPick }: TableButtonProps) {
+function TableButton({ t, status, totalCents, openedAtIso, isForeign, onPick }: TableButtonProps) {
   const pill = STATUS_PILL[status];
   return (
     <button
@@ -200,8 +253,16 @@ function TableButton({ t, status, totalCents, openedAtIso, onPick }: TableButton
             ? 'border-emerald-400/40'
             : 'border-white/10'
       }`}
+      title={
+        isForeign
+          ? 'Comandă deschisă pe alt dispozitiv — read-only până la deschiderea aici.'
+          : undefined
+      }
     >
       <span className={`absolute top-2 right-2 h-2 w-2 rounded-full ${STATUS_DOT[status]}`} />
+      {isForeign && (
+        <Lock className="absolute top-2 left-2 h-3 w-3 text-slate-400" />
+      )}
       <span className="text-lg font-bold text-white leading-none">{t.table_number}</span>
       {t.capacity != null && (
         <span className="text-[10px] text-slate-400 mt-1">{t.capacity} loc.</span>

@@ -15,10 +15,13 @@ import { createHttpSyncTransport } from './httpTransport';
 import { configureDispatch } from './dispatch';
 import { startBootstrapScheduler, type BootstrapScheduler } from './bootstrapScheduler';
 import { runBootstrap, type RunBootstrapResult } from './runBootstrap';
+import { startPullScheduler, type PullScheduler } from './pullScheduler';
+import { runPull, type RunPullResult } from './runPull';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
 
 type BootstrapListener = (r: RunBootstrapResult) => void;
+type PullListener = (r: RunPullResult) => void;
 
 export interface SyncEngine {
   store: EventStore;
@@ -26,9 +29,12 @@ export interface SyncEngine {
   transport: SyncTransport;
   exec: SqlExecutor;
   bootstrapScheduler: BootstrapScheduler;
+  pullScheduler: PullScheduler;
   /** Subscribe to every bootstrap attempt (foreground + scheduled).
    * Returns an unsubscribe function. */
   onBootstrapResult: (fn: BootstrapListener) => () => void;
+  /** Subscribe to every pull cycle. */
+  onPullResult: (fn: PullListener) => () => void;
   stop: () => void;
 }
 
@@ -89,12 +95,50 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
     return () => { listeners.delete(fn); };
   };
 
+  // Sprint 6 / 3: pull scheduler runs every 8s, broadcasts results so
+  // the catalog/remote-orders stores can refresh on each tick. The
+  // bootstrap scheduler keeps doing its 30-min refresh; the pull is
+  // the live channel for orders + kitchen tickets.
+  const pullListeners = new Set<PullListener>();
+  const broadcastPull = (r: RunPullResult) => {
+    for (const fn of pullListeners) {
+      try { fn(r); } catch { /* swallow */ }
+    }
+  };
+  // Kick a pull on startup so TablesPane sees the open tabs immediately,
+  // not eight seconds in. Push runs before pull on reconnect; on first
+  // start the outbox is empty so we just pull.
+  if (cfg.syncTransportMode === 'http') {
+    void runPull({ exec }).then(broadcastPull);
+  }
+  const pullScheduler = startPullScheduler({
+    exec,
+    isOnline: () => cfg.syncTransportMode === 'http',
+    onResult: broadcastPull,
+  });
+  const onPullResult: SyncEngine['onPullResult'] = (fn) => {
+    pullListeners.add(fn);
+    return () => { pullListeners.delete(fn); };
+  };
+
   const stop = () => {
     stopWorker();
     bootstrapScheduler.stop();
+    pullScheduler.stop();
     listeners.clear();
+    pullListeners.clear();
   };
-  _engine = { store, worker, transport, exec, bootstrapScheduler, onBootstrapResult, stop };
+  _engine = {
+    store,
+    worker,
+    transport,
+    exec,
+    bootstrapScheduler,
+    pullScheduler,
+    onBootstrapResult,
+    onPullResult,
+    stop,
+  };
   return _engine;
 }
 

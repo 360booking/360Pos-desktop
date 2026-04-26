@@ -9,6 +9,8 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
 const MIGRATION_V2_EVENTS_ORDER_LINK: &str =
     include_str!("../../src/sql/migrations/0002_events_order_link.sql");
+const MIGRATION_V3_REMOTE_READ_MODEL: &str =
+    include_str!("../../src/sql/migrations/0003_remote_read_model.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -69,6 +71,12 @@ fn main() {
             version: 2,
             description: "events.order_local_id",
             sql: MIGRATION_V2_EVENTS_ORDER_LINK,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 3,
+            description: "remote read model — Sprint 6",
+            sql: MIGRATION_V3_REMOTE_READ_MODEL,
             kind: MigrationKind::Up,
         },
     ];

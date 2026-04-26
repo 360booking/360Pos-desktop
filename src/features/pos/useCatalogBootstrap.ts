@@ -14,30 +14,38 @@
 import { useEffect } from 'react';
 import { startSyncEngine, getSyncEngine } from '@/lib/sync/bootstrap';
 import { useCatalog } from '@/store/catalog';
+import { useRemote } from '@/store/remote';
 
 export function useCatalogBootstrap() {
   useEffect(() => {
     let cancelled = false;
-    let unsubscribe: (() => void) | null = null;
+    let unsubscribeBootstrap: (() => void) | null = null;
+    let unsubscribePull: (() => void) | null = null;
 
     (async () => {
       const engine = getSyncEngine() ?? (await startSyncEngine());
       if (cancelled || !engine) return;
 
-      // Initial load from whatever's already in SQLite. If this is a
-      // fresh install the tables are empty — the foreground bootstrap
-      // inside startSyncEngine() will fire onBootstrapResult shortly
-      // after, and we'll re-read.
-      await useCatalog.getState().refreshFromDb(engine.exec);
+      // Initial loads — both the catalog (categories/products/tables)
+      // and the remote read model (open orders + tickets) come straight
+      // from SQLite on mount. The schedulers fill them shortly after.
+      await Promise.all([
+        useCatalog.getState().refreshFromDb(engine.exec),
+        useRemote.getState().refreshFromDb(engine.exec),
+      ]);
 
-      unsubscribe = engine.onBootstrapResult((r) => {
+      unsubscribeBootstrap = engine.onBootstrapResult((r) => {
         if (r.ok) void useCatalog.getState().refreshFromDb(engine.exec);
+      });
+      unsubscribePull = engine.onPullResult((r) => {
+        if (r.ok) void useRemote.getState().refreshFromDb(engine.exec);
       });
     })();
 
     return () => {
       cancelled = true;
-      unsubscribe?.();
+      unsubscribeBootstrap?.();
+      unsubscribePull?.();
     };
   }, []);
 }
