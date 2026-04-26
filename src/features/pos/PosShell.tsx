@@ -2,80 +2,64 @@ import { useMemo, useState } from 'react';
 import { Plus, Users, Utensils, Receipt, Send, CreditCard, Banknote } from 'lucide-react';
 import { StatusBar } from './StatusBar';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
+import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
 import type { ProductRow, TableRow } from '@/lib/db/catalogQueries';
 import {
-  addItem,
   computeTotals,
-  createOrder,
   formatMoney,
   rateToFloat,
   ROMANIAN_DEFAULT_VAT_BP,
-  type ActionCtx,
   type Order,
   type OrderTotals,
-  type TenantVatConfig,
 } from '@/core/pos-core';
 
 /**
  * Three-pane POS shell. Class strings match POSPage.tsx so the visual
- * footprint is identical. Sprint 4 / 2 wires the menu + tables panes to
- * the local SQLite catalogue (kept fresh by the bootstrap scheduler);
- * the cart still uses a demo order until Sprint 4 / 3 ports it.
+ * footprint is identical. Sprint 4 / 3 wires the cart to the live
+ * outbox: clicking a product runs addItem through the dispatch chain,
+ * the resulting events land in SQLite events + sync_outbox, and the
+ * worker pushes them to /api/pos/sync/push as soon as the device is
+ * online. The cart pane reads from the same useCurrentOrder store.
  */
 export function PosShell() {
   useCatalogBootstrap();
-  const { order, totals } = useDemoOrder();
+  const actions = useOrderActions();
+  const totals = useMemo<OrderTotals>(
+    () => (actions.order ? computeTotals(actions.order) : EMPTY_TOTALS),
+    [actions.order],
+  );
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
       <StatusBar />
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        <TablesPane />
-        <MenuPane />
-        <CartPane order={order} totals={totals} />
+        <TablesPane onPickTable={(id) => void actions.newOrder(id)} />
+        <MenuPane onPickProduct={(p) => void actions.addProduct(p)} />
+        <CartPane
+          order={actions.order}
+          totals={totals}
+          onCash={() => void actions.payCash()}
+          onClear={() => actions.clear()}
+        />
       </div>
     </div>
   );
 }
 
-/* ─── Demo order powered by pos-core (Sprint 1) ──────────────────────────── */
-
-const DEMO_VAT: TenantVatConfig = {
-  defaultRateBp: ROMANIAN_DEFAULT_VAT_BP,
-  foodRateBp: 900,
-  barRateBp: 1900,
+const EMPTY_TOTALS: OrderTotals = {
+  subtotalCents: 0,
+  discountCents: 0,
+  tipCents: 0,
+  vatCents: 0,
+  totalCents: 0,
+  paidCents: 0,
+  remainingCents: 0,
+  changeDueCents: 0,
 };
-
-function useDemoOrder(): { order: Order; totals: OrderTotals } {
-  return useMemo(() => {
-    let counter = 0;
-    const ctx: ActionCtx = {
-      clock: { nowIso: () => new Date().toISOString() },
-      ids: {
-        newId: () => `demo-${++counter}`,
-        newMutationId: () => `demo-mut-${++counter}`,
-      },
-      deviceId: 'pos-desktop-demo',
-      online: true,
-    };
-    let order = createOrder({ tableId: 't-demo', vatConfig: DEMO_VAT }, ctx).next;
-    order = addItem(
-      order,
-      { productId: null, productName: 'Salată Caesar', quantity: 1, unitPriceCents: 2800, categoryType: 'restaurant' },
-      ctx,
-    ).next;
-    order = addItem(
-      order,
-      { productId: null, productName: 'Coca-Cola 0.33L', quantity: 2, unitPriceCents: 900, categoryType: 'bar' },
-      ctx,
-    ).next;
-    return { order, totals: computeTotals(order) };
-  }, []);
-}
 
 /* ─── Left pane: tables ──────────────────────────────────────────────────── */
 
-function TablesPane() {
+function TablesPane({ onPickTable }: { onPickTable: (tableId: string) => void }) {
   const tables = useCatalog((s) => s.tables);
   const hydrated = useCatalog((s) => s.hydrated);
 
@@ -103,7 +87,7 @@ function TablesPane() {
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {tables.map((t) => (
-              <TableButton key={t.id} t={t} />
+              <TableButton key={t.id} t={t} onPick={() => onPickTable(t.id)} />
             ))}
           </div>
         )}
@@ -112,6 +96,7 @@ function TablesPane() {
       <div className="p-3 border-t border-white/10 bg-slate-950/80 backdrop-blur space-y-2">
         <button
           type="button"
+          onClick={() => onPickTable('')}
           className="touch-target w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-semibold text-sm shadow-lg shadow-violet-900/40 hover:from-violet-500 hover:to-indigo-500 inline-flex items-center justify-center gap-2 transition"
         >
           <Plus className="h-4 w-4" /> Comandă nouă
@@ -121,12 +106,13 @@ function TablesPane() {
   );
 }
 
-function TableButton({ t }: { t: TableRow }) {
+function TableButton({ t, onPick }: { t: TableRow; onPick: () => void }) {
   // No occupied state in the local catalogue yet — Sprint 5 brings the
   // open-tabs sync in. For now every table renders as available.
   return (
     <button
       type="button"
+      onClick={onPick}
       className="touch-target relative aspect-[4/3] rounded-xl border border-white/10 bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center"
     >
       <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-emerald-400" />
@@ -143,7 +129,7 @@ function TableButton({ t }: { t: TableRow }) {
 
 const ALL_CATEGORIES_ID = '__all__';
 
-function MenuPane() {
+function MenuPane({ onPickProduct }: { onPickProduct: (p: ProductRow) => void }) {
   const categories = useCatalog((s) => s.categories);
   const products = useCatalog((s) => s.products);
   const hydrated = useCatalog((s) => s.hydrated);
@@ -191,17 +177,20 @@ function MenuPane() {
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-5 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 auto-rows-max">
-          {visibleProducts.map((p) => <ProductCard key={p.id} p={p} />)}
+          {visibleProducts.map((p) => (
+            <ProductCard key={p.id} p={p} onPick={() => onPickProduct(p)} />
+          ))}
         </div>
       )}
     </section>
   );
 }
 
-function ProductCard({ p }: { p: ProductRow }) {
+function ProductCard({ p, onPick }: { p: ProductRow; onPick: () => void }) {
   return (
     <button
       type="button"
+      onClick={onPick}
       className="touch-target group relative text-left p-4 bg-white/[0.04] backdrop-blur-sm rounded-2xl border border-white/10 hover:border-violet-400/60 hover:bg-white/[0.08] hover:shadow-xl hover:shadow-violet-900/30 hover:-translate-y-0.5 transition-all duration-200 min-h-[140px] flex flex-col"
     >
       <div className="absolute top-3 right-3 h-8 w-8 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
@@ -232,7 +221,14 @@ function EmptyHint({ label, sub }: { label: string; sub?: string | null }) {
 
 /* ─── Right pane: order ticket ───────────────────────────────────────────── */
 
-function CartPane({ order, totals }: { order: Order; totals: OrderTotals }) {
+interface CartPaneProps {
+  order: Order | null;
+  totals: OrderTotals;
+  onCash: () => void;
+  onClear: () => void;
+}
+
+function CartPane({ order, totals, onCash, onClear }: CartPaneProps) {
   // Show the *blended* effective rate so the label stays accurate when the
   // order mixes food (9%) and bar (19%) lines.
   const effectiveRatePct = (() => {
@@ -240,7 +236,8 @@ function CartPane({ order, totals }: { order: Order; totals: OrderTotals }) {
     const net = Math.max(1, totals.totalCents - totals.vatCents);
     return (totals.vatCents / net) * 100;
   })();
-  const activeItems = order.items.filter((it) => !it.voidedAt);
+  const activeItems = order?.items.filter((it) => !it.voidedAt) ?? [];
+  const canPay = order != null && totals.totalCents > 0 && order.state !== 'paid' && order.state !== 'cancelled';
 
   return (
     <aside className="flex w-80 bg-slate-950/60 backdrop-blur border-l border-white/10 flex-col">
@@ -248,9 +245,20 @@ function CartPane({ order, totals }: { order: Order; totals: OrderTotals }) {
         <h2 className="font-semibold text-white text-sm flex items-center gap-2">
           <Receipt className="h-4 w-4 text-violet-400" /> Comandă
         </h2>
-        <span className="text-[10px] uppercase tracking-wider px-2 py-1 rounded font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30">
-          {order.state}
-        </span>
+        {order ? (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[10px] uppercase tracking-wider px-2 py-1 rounded font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30 hover:bg-violet-500/25"
+            title="Începe o comandă nouă"
+          >
+            {order.state}
+          </button>
+        ) : (
+          <span className="text-[10px] uppercase tracking-wider px-2 py-1 rounded font-semibold bg-slate-500/15 text-slate-300 border border-slate-400/30">
+            niciuna
+          </span>
+        )}
       </header>
 
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5">
@@ -273,7 +281,7 @@ function CartPane({ order, totals }: { order: Order; totals: OrderTotals }) {
         {activeItems.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center text-slate-400 text-sm gap-3">
             <Receipt className="h-10 w-10 text-slate-600" />
-            <p>Selectează o masă pentru a începe.</p>
+            <p>{order ? 'Adaugă produse din meniu.' : 'Apasă o masă sau "Comandă nouă".'}</p>
           </div>
         )}
       </div>
@@ -296,8 +304,9 @@ function CartPane({ order, totals }: { order: Order; totals: OrderTotals }) {
           </button>
           <button
             type="button"
-            disabled
-            className="touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-emerald-600/40 text-emerald-200 border border-emerald-400/20 disabled:opacity-50"
+            disabled={!canPay}
+            onClick={onCash}
+            className="touch-target rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-emerald-600/40 text-emerald-200 border border-emerald-400/20 hover:bg-emerald-600/60 disabled:opacity-50"
           >
             <Banknote className="h-4 w-4" /> Cash
           </button>
