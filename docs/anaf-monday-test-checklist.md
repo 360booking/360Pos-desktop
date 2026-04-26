@@ -115,3 +115,74 @@ gunzip -c /opt/360booking/backups/<latest>.sql.gz | \
 - Datecs thermal printer fiscalization (separate stack).
 - BT POS card payment integration (separate stack).
 - Per-tenant `ANAF_ENVIRONMENT` override (currently global env var; flagged as Sprint 4 follow-up in `project_anaf_efactura_integration.md`).
+- Inventory-impacting actions: do **NOT** click "Recepționează în stoc" on any pulled invoice; that creates `InventoryMovement` rows. Smoke ends at the line review.
+
+## 9. Sprint 9.5 readiness polish
+
+### What we explicitly test on Monday (dry-run only)
+
+1. **Token + cert health** (section 1).
+2. **Manual pull** triggered (`POST /api/cron/anaf-pull`) — observe behaviour, do **not** receive into stock.
+3. **Outbound submit on `api.anaf.ro/test`** ONLY — pick one demo order with `customer_cif` set, click `Trimite`, watch the worker flip statuses through `pending_validation → accepted/rejected`. If `rejected`, capture the `error_message` for fix.
+4. **Logs** (section 4) reviewed for the day's operations.
+
+### What we explicitly do NOT test on Monday
+
+- ❌ NO live submit to `api.anaf.ro/prod`. Default `ANAF_ENVIRONMENT=test` stays untouched.
+- ❌ NO pulling and receiving stock. Inbound is read-only on Monday.
+- ❌ NO bulk operations. One outbound, one inbound, that's the cap.
+- ❌ NO Datecs/BT POS/Card payment stuff — different stacks, different sessions.
+
+### Token / certificate prep before the session
+
+- [ ] `tenants.anaf_access_token` populated (visible in `/admin/integrations/anaf` as Connected).
+- [ ] `tenants.anaf_refresh_token` populated and `anaf_refresh_expires_at` is in the future.
+- [ ] If `needs_reauth`: complete OAuth wizard FIRST. Don't start any test if status is `needs_reauth`.
+- [ ] Digital cert uploaded on `https://logincert.anaf.ro/` for the test environment for the pilot CIF. Verify ANAF web UI shows it Active.
+
+### Who confirms live submit
+
+- Live submit to prod requires **explicit text confirmation from Ovidiu** in the session. Without that confirmation, the cutover steps in section 6 are **read-only documentation**, never run.
+
+### Where logs live (for Monday triage)
+
+| Source | Path |
+|---|---|
+| Pull cron output | `/var/log/360booking-anaf-pull.log` |
+| Push cron output | `/var/log/360booking-anaf-push.log` |
+| Refresh-token cron | `/var/log/360booking-anaf-refresh.log` |
+| Per-tenant audit (DB) | `anaf_outbound_uploads` + `anaf_sync_runs` |
+| Backend container | `docker compose logs backend --since 30m \| grep -i anaf` |
+
+### How to disable / pause ANAF without redeploy
+
+```bash
+# 1. Stop the cron jobs (host)
+crontab -e   # comment out the three anaf-* lines
+
+# 2. Stop in-flight outbound by marking queued items as cancelled
+docker compose exec postgres psql -U booking360 -d booking360 -c "
+  UPDATE anaf_outbound_uploads
+     SET status='cancelled', error_message='manual pause for incident'
+   WHERE status IN ('queued','pending_validation')
+"
+
+# 3. The desktop POS does NOT call ANAF endpoints, so no client-side
+#    flag is needed.
+```
+
+### What we do if the token is expired in the middle of testing
+
+1. Backend's refresh-token cron runs daily at 04:45 UTC; if the token is freshly expired, manually invoke:
+   ```bash
+   bash /opt/360booking/anaf-refresh-tokens.sh
+   tail -50 /var/log/360booking-anaf-refresh.log
+   ```
+2. If refresh also fails: `tenants.anaf_status` flips to `needs_reauth`. Walk through the OAuth wizard at `/admin/integrations/anaf` to re-issue both tokens. Resume tests after that.
+3. Never patch tokens directly in the DB during the session — go through the wizard so audit/logging stays consistent.
+
+### Test data we use
+
+- **Tenant:** Ovidiu's pilot CIF on the ANAF test environment.
+- **Outbound test invoice:** one previously-issued POS order with a `customer_cif` set on a small amount (<10 RON ideal). Captured ahead of the session, paths recorded below.
+- **Inbound test invoice:** if the SPV mailbox has a fixture invoice waiting, use it; otherwise the section is "no message" — that's the expected behaviour, not a failure.

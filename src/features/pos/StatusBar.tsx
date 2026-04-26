@@ -11,6 +11,7 @@ import {
   Skull,
   CloudDownload,
   LifeBuoy,
+  Settings,
 } from 'lucide-react';
 import { useDeviceStatus, type StatusLevel } from '@/store/deviceStatus';
 import { useCatalog } from '@/store/catalog';
@@ -75,9 +76,10 @@ function bootstrapStatus(lastSuccessfulAt: string | null): { level: StatusLevel;
 
 interface StatusBarProps {
   onOpenRecovery?: () => void;
+  onOpenDiagnostics?: () => void;
 }
 
-export function StatusBar({ onOpenRecovery }: StatusBarProps = {}) {
+export function StatusBar({ onOpenRecovery, onOpenDiagnostics }: StatusBarProps = {}) {
   const s = useDeviceStatus();
   const lastBootstrapAt = useCatalog((c) => c.lastSuccessfulAt);
   const recoveryCount = useRecovery((r) => r.rows.length);
@@ -113,6 +115,16 @@ export function StatusBar({ onOpenRecovery }: StatusBarProps = {}) {
         />
       </div>
       <div className="flex items-center gap-2">
+        {onOpenDiagnostics && (
+          <button
+            type="button"
+            onClick={onOpenDiagnostics}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-slate-300 border border-white/10 bg-slate-950/40 hover:bg-slate-700/40"
+            title="Diagnostics — copy snapshot for support"
+          >
+            <Settings className="h-3 w-3" />
+          </button>
+        )}
         {recoveryCount > 0 && onOpenRecovery && (
           <button
             type="button"

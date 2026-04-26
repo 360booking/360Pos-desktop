@@ -14,6 +14,45 @@ This is the operator-facing checklist for the **first run of POS Desktop on a Wi
 - [ ] Backend reachable: `curl https://360booking.ro/api/pos/health` → `pos_api_version: "1.2.0"`.
 - [ ] User account credentials available — must have role `waiter`, `tenant_admin` or `super_admin` on a tenant that has at least one `restaurant`.
 
+## 0.5 Preflight (run BEFORE `pnpm tauri dev`)
+
+Run each command in PowerShell. Each line should succeed; capture output for the failure-capture template if any fails.
+
+```powershell
+# Versions
+node --version                              # expect: v20.x or v22.x
+pnpm --version                              # expect: 9.x
+rustup show                                 # expect: stable-x86_64-pc-windows-msvc default
+where.exe rustc                             # expect: a path under .cargo\bin
+
+# WebView2 runtime (Tauri 2 requires this; usually preinstalled on Win 11)
+Get-AppxPackage -Name *WebView*             # expect: at least one match
+# Or install: winget install Microsoft.EdgeWebView2Runtime
+
+# Backend reachable from this exact machine
+curl.exe -sS https://360booking.ro/api/pos/health
+# expect: {"status":"ok","pos_api_version":"1.2.0",...}
+
+# APPDATA writable (Tauri stores SQLite DB + logs there)
+$dst = "$env:APPDATA\360booking-pos"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+"$(Get-Date) preflight write check" | Out-File "$dst\preflight.txt" -Encoding ascii
+Get-Content "$dst\preflight.txt"            # expect: the line we just wrote
+Remove-Item "$dst\preflight.txt"
+
+# SQLite create probe (Tauri's plugin will do this for real on launch;
+# this just proves the directory + filesystem permissions work)
+sqlite3 "$dst\preflight.db" "CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1); SELECT count(*) FROM t;"
+# expect: 1
+Remove-Item "$dst\preflight.db"
+
+# COM ports listing (only if a fiscal/payment terminal is meant to be tested here)
+Get-WmiObject Win32_SerialPort | Select-Object Name,DeviceID,Description
+# expect: zero or more entries depending on hardware
+```
+
+If any line above fails, **stop here** and report. The Tauri shell will not behave any better than the prerequisites underneath it.
+
 ## 1. Clone + install
 
 ```powershell
@@ -136,13 +175,75 @@ pnpm tauri build
 - [ ] Run the MSI, install, launch from Start Menu.
 - [ ] Repeat sections 4–9 against the installed build (no `tauri dev`).
 
-## 12. Hand-off back to dev
+## 12. Tauri config sanity (do this once before MSI build)
 
-If any section above fails, stop, capture:
-- The failing step.
-- Backend `docker compose logs backend --tail=200`.
-- Desktop `%APPDATA%\360booking-pos\logs\*` (Tauri rotates them daily).
-- A `sqlite3 $db ".dump"` of the local DB (small — < 1 MB per device).
-- Screenshot of the StatusBar.
+Audited 2026-04-26 in `src-tauri/tauri.conf.json` and `src-tauri/capabilities/default.json`:
 
-…and ping back so the dev team can patch before the pilot opens to live customers.
+| Item | State | Notes |
+|---|---|---|
+| `identifier` | ✅ `com.x360booking.pos` | stable, MSI/NSIS will reuse it |
+| `productName` / `version` | ✅ `360booking POS` / `0.1.0` | bump version on every public MSI |
+| `bundle.targets` | ✅ `["msi", "nsis"]` | both Win installers; pick one for distribution |
+| `app.security.csp` | ✅ default-src 'self' + connect-src https://* | tight |
+| `capabilities/default.json` | ✅ `core:default`, `log:default`, `shell:allow-open`, `sql:*` for `sqlite:pos-desktop.db` | no serialport / no fiscal-bridge sidecar permissions yet — correct for Sprint 9.5 (no real hardware) |
+| Sidecar Datecs | ✅ NOT auto-launched | `fiscal_bridge_status` command only checks file presence; never spawns |
+| **Icons** | ⚠ **BLOCKER for MSI build** | `src-tauri/icons/` is empty. `tauri.conf.json` references `icons/32x32.png`, `icons/128x128.png`, `icons/icon.ico` but the files don't exist on disk. `pnpm tauri build` will fail until icons are added. `pnpm tauri dev` works without them. |
+
+Action items before MSI distribution:
+- [ ] Place `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, `icon.ico` under `src-tauri/icons/`. The Tauri docs have a generator: `npx @tauri-apps/cli icon path/to/source-1024.png`.
+- [ ] Bump `productVersion` on every public installer.
+- [ ] Verify the publisher field matches the signing certificate (for code-signed releases — Sprint 11+).
+
+## 13. Failure capture template
+
+When something doesn't work, paste this template into the support ticket / Slack thread filled in:
+
+```
+=== 360booking POS desktop — failure report ===
+Windows version:       (Win+R → winver, paste the build line)
+Machine name:          (hostname)
+App version:           (from DiagnosticsModal → snapshot.appVersion)
+Build profile:         (snapshot.buildProfile)
+Sync transport mode:   (snapshot.syncTransportMode)
+Backend URL:           (snapshot.backendUrl)
+Device ID:             (snapshot.deviceId)
+SQLite DB path:        %APPDATA%\360booking-pos\pos-desktop.db
+SQLite migration ver:  (sqlite3 ... "SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1")
+
+What I was doing (one sentence):
+
+Expected:
+
+Actual:
+
+Reproduction steps:
+  1.
+  2.
+  3.
+
+DiagnosticsModal → Copy snapshot output (paste below):
+---8<---
+(paste here)
+--->8---
+
+Tauri console output (last 100 lines):
+---8<---
+(paste here)
+--->8---
+
+Backend logs around the time of failure:
+   docker compose logs backend --since 5m | grep <relevant-route>
+---8<---
+(paste here)
+--->8---
+
+Screenshot:
+   (attach: full window + StatusBar visible)
+
+SQLite dump (≤1 MB):
+   sqlite3 "$env:APPDATA\360booking-pos\pos-desktop.db" .dump > C:\Temp\pos-dump.sql
+   (attach pos-dump.sql)
+=== end ===
+```
+
+Send the filled-in template back so the dev team can patch before the pilot opens to live customers.
