@@ -25,6 +25,7 @@ const EMPTY: CatalogSnapshot = {
   tables: [],
   lastSuccessfulAt: null,
   restaurantName: null,
+  currentUser: null,
 };
 
 export const useCatalog = create<CatalogState>((set) => ({

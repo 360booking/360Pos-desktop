@@ -10,9 +10,11 @@ import {
   AlertTriangle,
   Skull,
   CloudDownload,
+  LifeBuoy,
 } from 'lucide-react';
 import { useDeviceStatus, type StatusLevel } from '@/store/deviceStatus';
 import { useCatalog } from '@/store/catalog';
+import { useRecovery } from '@/store/recovery';
 
 /** A bootstrap older than this counts as stale — yellow dot. The
  * scheduler ticks every 30 minutes (BOOTSTRAP_REFRESH_MS) so we give it
@@ -71,9 +73,14 @@ function bootstrapStatus(lastSuccessfulAt: string | null): { level: StatusLevel;
   return { level: 'warn', detail: `${m}m` };
 }
 
-export function StatusBar() {
+interface StatusBarProps {
+  onOpenRecovery?: () => void;
+}
+
+export function StatusBar({ onOpenRecovery }: StatusBarProps = {}) {
   const s = useDeviceStatus();
   const lastBootstrapAt = useCatalog((c) => c.lastSuccessfulAt);
+  const recoveryCount = useRecovery((r) => r.rows.length);
   const bs = bootstrapStatus(lastBootstrapAt);
   return (
     <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-white/10 bg-slate-950/60 backdrop-blur">
@@ -106,6 +113,16 @@ export function StatusBar() {
         />
       </div>
       <div className="flex items-center gap-2">
+        {recoveryCount > 0 && onOpenRecovery && (
+          <button
+            type="button"
+            onClick={onOpenRecovery}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-200 border border-amber-400/40 hover:bg-amber-500/30"
+            title="Plăți cu status necunoscut — apasă pentru recovery"
+          >
+            <LifeBuoy className="h-3 w-3" /> {recoveryCount} recovery
+          </button>
+        )}
         {s.sync.failed > 0 && (
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-400/40">
             <AlertTriangle className="h-3 w-3" /> {s.sync.failed} failed

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import axios from 'axios';
 import { claimOrder, releaseOrder } from '../orderLock';
 
 vi.mock('../client', () => {

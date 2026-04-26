@@ -262,3 +262,41 @@ Backend tests: 10 new (claim happy / already_owned / conflict / force-rejected /
 pos-desktop tests: 3 new orderLock tests (claim happy, conflict pass-through, release). 125 vitest tests pass (was 122).
 
 Slice 3 (walk-in / delivery sheets) — **deferred again**. Lock + payment surface filled the sprint exactly. Rolled into Sprint 8.
+
+---
+
+## Sprint 8 closeout — 2026-04-26
+
+Operational stabilization sprint — closes recovery, lock-renew, and live KDS visibility before pilot. Slice 3 (walk-in / delivery intake) deferred again because Slice 1 + 2 polish and KDS minimal consumed the budget.
+
+New deltas (Tier-3 desktop-only, justified):
+
+| Delta | Reason | Where |
+|---|---|---|
+| `RecoveryTray` (StatusBar pill + modal panel) | Web POS has no `CARD_PAYMENT_UNKNOWN` recovery surface; desktop owns the terminal so the recovery flow lives here | `pos-desktop/src/features/pos/RecoveryTray.tsx` |
+| Heartbeat scheduler with `renewLocksFor` | Web POS doesn't need it (browser sessions don't hold cross-device locks); desktop must keep its 10-min lock alive while the operator is busy | `pos-desktop/src/lib/sync/heartbeatScheduler.ts` |
+| Force-claim button gated on `currentUser.role` | Same reason as the Sprint 7 lock badge: web doesn't need ownership UI at all | `pos-desktop/src/features/pos/ClaimOrderModal.tsx` |
+
+Backend additions:
+- Alembic `kdslive0428` adds `restaurant_kitchen_tickets.updated_at` (NOT NULL, default now, indexed).
+- `POST /api/pos/kitchen-tickets/{id}/seen` and `complete` route through `restaurant_order_service.mark_ticket_seen / mark_ticket_completed`. Idempotent.
+- `claim` / `release` explicitly bump `order.updated_at` so the pull cursor advances on lock changes.
+- Heartbeat `renewLocksFor` filter: owner-only AND `is_open=true`.
+- Pull cursor candidates extended with `ticket.updated_at`.
+- `POS_API_VERSION` → `1.2.0`.
+
+Pos-desktop additions:
+- SQLite migrations `0005_card_recovery.sql` (local recovery queue).
+- `lib/db/cardRecovery.ts` + `store/recovery.ts` (zustand).
+- `features/pos/RecoveryTray.tsx`.
+- `lib/sync/heartbeatScheduler.ts` runs every 60s with offline-skip + runNow().
+- Engine wires the heartbeat scheduler.
+- `hydrateCatalog` snapshots `bootstrap.currentUser` so `useCatalog` exposes role.
+- `ClaimOrderModal` `canForce` is now role-gated.
+- `PaymentModal` raises a recovery row when the simulator returns `unknown`.
+
+Backend tests: 4 new (heartbeat owner-only & is_open & cross-device, kitchen seen/complete idempotent, kitchen 404, claim advances pull cursor). **38 backend tests pass** (was 34 at end of Sprint 7).
+
+pos-desktop tests: full vitest suite green at **125 passed** (no new tests this sprint — UI / scheduler bits are exercised through their state-machine equivalents in pos-core; we'll add a recovery-store test in Sprint 9 alongside the BT POS hookup).
+
+Slice 3 (walk-in / delivery sheets) — **still deferred**. Recommend Sprint 9 picks it up only after the Tauri smoke on Windows is green and the pilot decides which intake surfaces matter first.

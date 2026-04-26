@@ -17,6 +17,7 @@ import { startBootstrapScheduler, type BootstrapScheduler } from './bootstrapSch
 import { runBootstrap, type RunBootstrapResult } from './runBootstrap';
 import { startPullScheduler, type PullScheduler } from './pullScheduler';
 import { runPull, type RunPullResult } from './runPull';
+import { startHeartbeatScheduler, type HeartbeatScheduler } from './heartbeatScheduler';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
 
@@ -30,6 +31,7 @@ export interface SyncEngine {
   exec: SqlExecutor;
   bootstrapScheduler: BootstrapScheduler;
   pullScheduler: PullScheduler;
+  heartbeatScheduler: HeartbeatScheduler;
   /** Subscribe to every bootstrap attempt (foreground + scheduled).
    * Returns an unsubscribe function. */
   onBootstrapResult: (fn: BootstrapListener) => () => void;
@@ -121,10 +123,17 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
     return () => { pullListeners.delete(fn); };
   };
 
+  // Sprint 8 — heartbeat scheduler keeps locks renewed for orders we
+  // own and lets the backend track device liveness. Skipped offline.
+  const heartbeatScheduler = startHeartbeatScheduler({
+    isOnline: () => cfg.syncTransportMode === 'http',
+  });
+
   const stop = () => {
     stopWorker();
     bootstrapScheduler.stop();
     pullScheduler.stop();
+    heartbeatScheduler.stop();
     listeners.clear();
     pullListeners.clear();
   };
@@ -135,6 +144,7 @@ export async function startSyncEngine(): Promise<SyncEngine | null> {
     exec,
     bootstrapScheduler,
     pullScheduler,
+    heartbeatScheduler,
     onBootstrapResult,
     onPullResult,
     stop,

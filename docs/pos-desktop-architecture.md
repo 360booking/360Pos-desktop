@@ -262,6 +262,70 @@ The outer transaction is committed once, at the end of the `/api/pos/sync/push` 
 | `PAYMENT_REGISTERED` | ✅ Sprint 4 | `restaurant_order_service.add_payment` (auto-issues fiscal receipt on full settle) | `paymentId`, `orderId`, `paymentStatus`, `fiscalReceiptNumber` |
 | `DISCOUNT_APPLIED`, `TIP_ADDED`, `FISCAL_*`, `ORDER_CLOSED`, `ORDER_CANCELLED` | ⏳ | (Sprint 6+) | `{ack:true, stage:"stored"}` (envelope persisted for forensic replay) |
 
+### Heartbeat + Recovery + KDS sync (Sprint 8)
+
+**Heartbeat renew.** The desktop runs a `heartbeatScheduler` every 60
+seconds that POSTs to `/api/pos/devices/{deviceId}/heartbeat` with the
+device's status snapshot plus a `renewLocksFor: [orderId, …]` list of
+remote orders this device currently owns (`remote_orders.is_open=1
+AND owner_device_id == cfg.deviceId`). The backend bumps
+`owner_expires_at` only on rows that satisfy `owner_device_id ==
+caller_device_id AND is_open = true` — a different device, or a
+closed order, never moves. Closed orders therefore can't pin a lock,
+matching the Sprint 7 TTL guarantee.
+
+**KDS sync minimal.** `restaurant_kitchen_tickets` gains an `updated_at`
+column (Alembic `kdslive0428`). Two new endpoints route through the
+existing service helpers:
+
+```
+POST /api/pos/kitchen-tickets/{id}/seen      → mark_ticket_seen (idempotent)
+POST /api/pos/kitchen-tickets/{id}/complete  → mark_ticket_completed (idempotent)
+```
+
+Both bump `updated_at` on the first transition (a second call is a
+no-op). The pull cursor now considers `max(order.updated_at,
+order_item.updated_at, ticket.updated_at)`, so a ticket transition on
+the kitchen station propagates to every paired desktop within one pull
+tick (~8s). KitchenQueueStrip therefore reflects "preparing" / freshly
+completed tickets without a manual refresh.
+
+**Recovery Tray.** `CARD_PAYMENT_UNKNOWN` events now also persist into a
+local SQLite table `card_recoveries` (migration 0005). When the
+operator triggers an unknown outcome through `PaymentModal`, the
+modal raises a recovery row alongside the dedup-spine entry and shows
+a recovery hint. The `StatusBar` exposes a yellow `recovery N` pill
+(visible only when there are open rows) that opens `RecoveryTray`.
+The tray lists every open row with order/amount/timestamp/auth-code
+and four actions:
+
+- **Plătit** — flips status to `resolved_paid`. Sprint 8 only marks the
+  recovery local; backend reconciliation lands when a real BT POS
+  adapter (or terminal-status query) is wired in Sprint 9+.
+- **Void** — flips to `resolved_void`. The order stays unchanged.
+- **Detalii** — shows the raw row (trace, RRN, auth_code) for a
+  manual cross-check against the terminal printout.
+- **Retry** — stub; will hit the future BT POS status endpoint.
+
+The forensic-only rule from Sprint 7 still holds on the backend: an
+unknown card event never auto-flips `payment_status` and never lets
+the order auto-fiscalise. The tray is the path through which the
+manager closes the loop.
+
+**Cursor strategy update.** With ticket `updated_at` and explicit
+`order.updated_at` bumps inside `claim` / `release`, the claim↔pull
+race window shrinks to one pull interval (~8s) instead of "until the
+next unrelated edit". Compound `(updated_at, id)` cursor remains a
+Sprint 9 / 10 polish.
+
+**Force-claim manager UI.** `ClaimOrderModal` now reads the operator's
+role from `useCatalog.currentUser` (snapshotted into
+`settings.bootstrap.currentUser` by `hydrateCatalog`) and renders the
+"Preluare forțată" button only when role ∈ {tenant_admin,
+super_admin}. The backend remains the source of truth — a waiter
+sending `force=true` still gets `failed/FORCE_REQUIRES_MANAGER`, but
+the desktop UI no longer dangles a button the user can't use.
+
 ### Order lock (Sprint 7)
 
 `restaurant_orders` gains three columns via Alembic `posown0428`:

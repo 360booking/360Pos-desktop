@@ -31,12 +31,19 @@ export interface TableRow {
   is_reservable: number;
 }
 
+export interface CurrentUser {
+  id: string;
+  role: string;
+  name: string | null;
+}
+
 export interface CatalogSnapshot {
   categories: CategoryRow[];
   products: ProductRow[];
   tables: TableRow[];
   lastSuccessfulAt: string | null;
   restaurantName: string | null;
+  currentUser: CurrentUser | null;
 }
 
 export async function readCatalog(exec: SqlExecutor): Promise<CatalogSnapshot> {
@@ -57,7 +64,7 @@ export async function readCatalog(exec: SqlExecutor): Promise<CatalogSnapshot> {
     ),
     exec.select<{ key: string; value_json: string }>(
       `SELECT key, value_json FROM settings
-        WHERE key IN ('bootstrap.lastSuccessfulAt', 'bootstrap.restaurantName')`,
+        WHERE key IN ('bootstrap.lastSuccessfulAt', 'bootstrap.restaurantName', 'bootstrap.currentUser')`,
     ),
   ]);
 
@@ -78,5 +85,6 @@ export async function readCatalog(exec: SqlExecutor): Promise<CatalogSnapshot> {
     tables,
     lastSuccessfulAt: (parse('bootstrap.lastSuccessfulAt') as string) ?? null,
     restaurantName: (parse('bootstrap.restaurantName') as string) ?? null,
+    currentUser: (parse('bootstrap.currentUser') as CurrentUser | null) ?? null,
   };
 }

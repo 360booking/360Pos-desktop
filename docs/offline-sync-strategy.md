@@ -249,3 +249,45 @@ The desktop's `PaymentModal` surfaces a clear recovery prompt and
 the operator must reconcile manually (check the terminal slip)
 before retrying. This matches the same rule already in
 `fiscal-flow.md` for fiscal `unknown` outcomes.
+
+---
+
+## Sprint 8 — operational polish
+
+**Heartbeat renew.** Every 60 seconds the desktop POSTs to
+`/api/pos/devices/{deviceId}/heartbeat` with `renewLocksFor: [orderId,
+…]`, computed from `remote_orders.is_open=1 AND owner_device_id ==
+cfg.deviceId`. The backend bumps `owner_expires_at` only on rows it
+already owns AND that are still open. A device can never use the
+heartbeat to take over someone else's table; a closed order can never
+have its lock renewed.
+
+**Live KDS visibility.** `restaurant_kitchen_tickets.updated_at` is the
+new column that lets the pull cursor advance on a ticket transition.
+Two new endpoints:
+
+```
+POST /api/pos/kitchen-tickets/{id}/seen       (idempotent)
+POST /api/pos/kitchen-tickets/{id}/complete   (idempotent)
+```
+
+The pull cursor now uses `max(order.updated_at, item.updated_at,
+ticket.updated_at)`, so any of the three kinds of mutation flows
+through to other paired desktops within one tick (~8s).
+
+**Recovery Tray.** A local SQLite table `card_recoveries` (migration
+0005) holds every CARD_PAYMENT_UNKNOWN raised by `PaymentModal`. The
+operator resolves rows manually (Plătit / Void / Detalii / Retry-stub).
+Until resolved, the StatusBar shows a yellow `recovery N` pill that
+opens the tray. The order itself is never auto-paid by anything in the
+recovery flow — settling unfortunately still requires either a real
+backend reconciliation (Sprint 9+ when the BT POS adapter ships) or
+an explicit manual cash/card retry.
+
+**Compound cursor reduction.** Sprint 7 left a window where a claim/
+release wouldn't surface in the pull until an unrelated edit bumped
+`order.updated_at`. Sprint 8 closes that by writing `updated_at`
+explicitly inside `claim_order` and `release_order`. The full
+compound `(updated_at, id)` cursor remains a Sprint 9/10 polish for
+microsecond-tied edits — for normal restaurant pace (>1 ms between
+actions on the same row), the explicit bump is sufficient.

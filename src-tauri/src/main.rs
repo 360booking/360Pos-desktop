@@ -13,6 +13,8 @@ const MIGRATION_V3_REMOTE_READ_MODEL: &str =
     include_str!("../../src/sql/migrations/0003_remote_read_model.sql");
 const MIGRATION_V4_REMOTE_ORDERS_OWNERSHIP: &str =
     include_str!("../../src/sql/migrations/0004_remote_orders_ownership.sql");
+const MIGRATION_V5_CARD_RECOVERY: &str =
+    include_str!("../../src/sql/migrations/0005_card_recovery.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -85,6 +87,12 @@ fn main() {
             version: 4,
             description: "remote_orders ownership — Sprint 7",
             sql: MIGRATION_V4_REMOTE_ORDERS_OWNERSHIP,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "card_recoveries queue — Sprint 8",
+            sql: MIGRATION_V5_CARD_RECOVERY,
             kind: MigrationKind::Up,
         },
     ];

@@ -120,6 +120,10 @@ export async function hydrateCatalog(
       ['bootstrap.restaurantName', bootstrap.restaurant?.name ?? null],
       ['bootstrap.vatConfig', bootstrap.vatConfig],
       ['bootstrap.syncCursor', bootstrap.syncCursor],
+      // Sprint 8 — keep the calling user's role/id around so the
+      // ClaimOrderModal can render the force-claim button only to
+      // managers/admins without a separate /me round-trip.
+      ['bootstrap.currentUser', bootstrap.users?.[0] ?? null],
     ];
     for (const [key, value] of settings) {
       await tx.execute(

@@ -41,6 +41,8 @@ import { formatMoney } from '@/core/pos-core';
 import type { OrderTotals } from '@/core/pos-core';
 import { SimulatorPaymentAdapter } from '@/adapters/payment/simulator';
 import { getConfig } from '@/lib/config';
+import { useRecovery } from '@/store/recovery';
+import { getSyncEngine } from '@/lib/sync/bootstrap';
 
 type CardPhase =
   | 'idle'
@@ -136,8 +138,21 @@ export function PaymentModal({ orderId, totals, onClose, onCash, onCardOutcome }
       } else if (result.status === 'declined') {
         setCardError('Plata a fost respinsă de terminal.');
       } else if (result.status === 'unknown') {
+        // Sprint 8 — also raise a Recovery Tray entry so the unknown
+        // doesn't disappear when the modal closes.
+        const engine = getSyncEngine();
+        if (engine) {
+          void useRecovery.getState().raise(engine.exec, {
+            id: `cr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            orderId,
+            amountCents: remaining,
+            terminalTrace: result.rawTrace ?? null,
+            terminalAuthCode: result.authCode ?? null,
+            terminalRrn: result.rrn ?? null,
+          });
+        }
         setCardError(
-          'Status terminal necunoscut — verifică manual înainte să reîncerci.',
+          'Status terminal necunoscut — verifică manual și rezolvă din Recovery Tray.',
         );
       }
     } catch (err) {

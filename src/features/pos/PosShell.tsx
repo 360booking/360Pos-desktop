@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
 import { StatusBar } from './StatusBar';
 import { KitchenQueueStrip } from './KitchenQueueStrip';
 import { ClaimOrderModal } from './ClaimOrderModal';
 import { PaymentModal } from './PaymentModal';
+import { RecoveryTray } from './RecoveryTray';
+import { useRecovery } from '@/store/recovery';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
@@ -38,9 +40,17 @@ export function PosShell() {
 
   // Modal states. ClaimOrderModal opens when the operator taps a remote
   // table whose lock is held by another device. PaymentModal opens from
-  // the cart's Cash button.
+  // the cart's Cash button. RecoveryTray opens from the StatusBar pill.
   const [claimTarget, setClaimTarget] = useState<RemoteOrderRow | null>(null);
   const [paymentOpen, setPaymentOpen] = useState(false);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+
+  // Hydrate the recovery list once on mount so the StatusBar pill
+  // reflects pre-existing rows from a prior session.
+  useEffect(() => {
+    const e = getSyncEngine();
+    if (e) void useRecovery.getState().refresh(e.exec);
+  }, []);
 
   function handleTablePick(tableId: string) {
     const remote = useRemote.getState().orders.find((o) => o.table_id === tableId);
@@ -62,7 +72,7 @@ export function PosShell() {
 
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-violet-950 text-slate-100">
-      <StatusBar />
+      <StatusBar onOpenRecovery={() => setRecoveryOpen(true)} />
       <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <TablesPane
@@ -87,7 +97,11 @@ export function PosShell() {
           orderId={claimTarget.id}
           ownerDeviceId={claimTarget.owner_device_id}
           expiresAt={claimTarget.owner_expires_at}
-          canForce={false}
+          canForce={
+            ['super_admin', 'tenant_admin'].includes(
+              useCatalog.getState().currentUser?.role ?? '',
+            )
+          }
           onClose={() => setClaimTarget(null)}
           onClaimed={onClaimedFromModal}
         />
@@ -103,6 +117,7 @@ export function PosShell() {
           }
         />
       )}
+      {recoveryOpen && <RecoveryTray onClose={() => setRecoveryOpen(false)} />}
     </div>
   );
 }
