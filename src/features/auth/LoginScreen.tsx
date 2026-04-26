@@ -258,6 +258,22 @@ function BackendStatus({
   compact?: boolean;
 }) {
   const ok = health?.ok === true;
+  // The detail line under the pill — green: latency + version; red:
+  // error class + status. No tokens, no headers, just enough for a
+  // tester to forward to support.
+  let detail: string;
+  if (checking) {
+    detail = 'verific...';
+  } else if (ok) {
+    detail = `online · ${health?.latencyMs ?? '?'}ms`;
+  } else if (health?.errorClass) {
+    const cls = health.errorClass;
+    const status = health.errorStatus ? ` (${health.errorStatus})` : '';
+    detail = `offline · ${cls}${status}`;
+  } else {
+    detail = 'offline';
+  }
+  const showUrlAndError = !compact;
   return (
     <div className={compact ? 'flex w-full items-center justify-between gap-3' : 'rounded-2xl border border-white/10 bg-slate-950/60 p-4'}>
       <div className="flex items-center gap-3">
@@ -273,13 +289,18 @@ function BackendStatus({
             Backend
           </p>
           <p className={compact ? 'text-xs text-slate-300' : 'text-sm text-slate-200'}>
-            {checking
-              ? 'verific...'
-              : ok
-              ? `online · ${health?.latencyMs ?? '?'}ms`
-              : 'offline'}
+            {detail}
           </p>
-          {!compact ? <p className="mt-1 truncate text-[11px] text-slate-500">{backendUrl}</p> : null}
+          {showUrlAndError ? (
+            <p className="mt-1 truncate text-[11px] text-slate-500" title={health?.resolvedUrl ?? backendUrl}>
+              {health?.resolvedUrl ?? backendUrl}
+            </p>
+          ) : null}
+          {showUrlAndError && health && !ok && health.errorDetail ? (
+            <p className="mt-1 break-words text-[11px] text-rose-300/80">
+              {health.errorDetail}
+            </p>
+          ) : null}
         </div>
       </div>
       <button

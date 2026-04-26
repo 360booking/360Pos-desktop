@@ -16,6 +16,7 @@ import { getConfig } from '@/lib/config';
 import { logger } from '@/lib/logger';
 import { isAccessTokenStale, readAccessToken, useAuthStore } from '@/store/auth';
 import { refresh as refreshAccessToken } from '@/lib/api/auth';
+import { rememberHealth } from '@/lib/api/healthLast';
 
 declare module 'axios' {
   interface AxiosRequestConfig {
@@ -112,30 +113,114 @@ export function getApiClient(): AxiosInstance {
   return _client;
 }
 
+export type HealthErrorClass =
+  | 'network'
+  | 'cors'
+  | 'timeout'
+  | 'http_status'
+  | 'invalid_url'
+  | 'unknown';
+
 export interface HealthResponse {
   ok: boolean;
   latencyMs: number;
+  /** URL the request actually went to — surfaced in LoginScreen for support. */
+  resolvedUrl: string;
   serverVersion?: string;
   posApiVersion?: string;
   serverTime?: string;
+  /** Set when ok=false. Class + short message + status (if any). */
+  errorClass?: HealthErrorClass;
+  errorDetail?: string;
+  errorStatus?: number;
+}
+
+function composeHealthUrl(baseUrl: string): string {
+  // Defend against config.json setting backendUrl with a trailing slash
+  // ("https://360booking.ro/") which would axios-resolve to
+  // "https://360booking.ro/api/pos/health" anyway, but the visible URL
+  // we display in diagnostics should be unambiguous.
+  const trimmed = (baseUrl || '').replace(/\/+$/, '');
+  return `${trimmed}/api/pos/health`;
+}
+
+function classifyAxiosError(err: unknown): {
+  cls: HealthErrorClass;
+  detail: string;
+  status?: number;
+} {
+  if (!axios.isAxiosError(err)) {
+    return { cls: 'unknown', detail: String(err) };
+  }
+  if (err.code === 'ECONNABORTED' || /timeout/i.test(err.message)) {
+    return { cls: 'timeout', detail: err.message };
+  }
+  if (err.response) {
+    return {
+      cls: 'http_status',
+      detail: `HTTP ${err.response.status}`,
+      status: err.response.status,
+    };
+  }
+  // No response object means the browser layer dropped the response —
+  // CORS rejection looks like this in a Tauri webview, as does a real
+  // network failure. We can't tell them apart from JS without parsing
+  // the dev console; in the wild, "Network Error" + Tauri webview is
+  // overwhelmingly CORS, so we surface that hint.
+  if (err.request && /Network Error/i.test(err.message)) {
+    return { cls: 'cors', detail: 'Network Error (likely CORS or DNS)' };
+  }
+  return { cls: 'network', detail: err.message };
 }
 
 export async function health(): Promise<HealthResponse> {
   const t0 = performance.now();
+  const baseUrl = getConfig().backendUrl;
+  const url = composeHealthUrl(baseUrl);
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+    const out: HealthResponse = {
+      ok: false,
+      latencyMs: 0,
+      resolvedUrl: url,
+      errorClass: 'invalid_url',
+      errorDetail: `backendUrl invalid: ${baseUrl || '<empty>'}`,
+    };
+    rememberHealth(out);
+    return out;
+  }
   try {
     const r = await getApiClient().get('/api/pos/health', {
-      timeout: 3_000,
+      timeout: 5_000,
       skipAuth: true,
     });
     const latencyMs = Math.round(performance.now() - t0);
-    return {
+    const out: HealthResponse = {
       ok: r.status >= 200 && r.status < 300,
       latencyMs,
+      resolvedUrl: url,
       serverVersion: r.data?.app_version,
       posApiVersion: r.data?.pos_api_version,
       serverTime: r.data?.server_time,
     };
-  } catch {
-    return { ok: false, latencyMs: Math.round(performance.now() - t0) };
+    rememberHealth(out);
+    return out;
+  } catch (err) {
+    const c = classifyAxiosError(err);
+    logger.warn('http', 'health probe failed', {
+      url,
+      cls: c.cls,
+      detail: c.detail,
+      status: c.status,
+    });
+    const out: HealthResponse = {
+      ok: false,
+      latencyMs: Math.round(performance.now() - t0),
+      resolvedUrl: url,
+      errorClass: c.cls,
+      errorDetail: c.detail,
+      errorStatus: c.status,
+    };
+    rememberHealth(out);
+    return out;
   }
 }

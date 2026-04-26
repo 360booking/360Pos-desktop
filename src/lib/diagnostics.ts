@@ -15,6 +15,7 @@ import { useRecovery } from '@/store/recovery';
 import { useRemote } from '@/store/remote';
 import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
+import { readLastHealth } from '@/lib/api/healthLast';
 
 export interface DiagnosticsSnapshot {
   // ─── App / config ─────────────────────────────────────────────────
@@ -48,6 +49,17 @@ export interface DiagnosticsSnapshot {
   refreshTokenStatus: 'present' | 'missing';
   /** Whether refresh token is persisted to disk (stay-logged-in). */
   refreshTokenPersisted: boolean;
+
+  /** Last /api/pos/health probe URL (computed from backendUrl). */
+  healthUrl: string | null;
+  /** Last /api/pos/health probe outcome. */
+  healthOk: boolean | null;
+  healthLatencyMs: number | null;
+  /** Error class when last probe failed: network/cors/timeout/http_status/invalid_url/unknown. */
+  healthErrorClass: string | null;
+  /** Short error message — never headers, never tokens. */
+  healthErrorDetail: string | null;
+  healthErrorStatus: number | null;
 
   // ─── Local DB ─────────────────────────────────────────────────────
   /** Filename only (full path lives at %APPDATA%\360booking-pos\). */
@@ -101,6 +113,7 @@ export function snapshot(): DiagnosticsSnapshot {
     secondsToExpiry = Math.floor((auth.accessTokenExpiresAt - Date.now()) / 1_000);
     accessStatus = secondsToExpiry > 0 ? 'present' : 'expired';
   }
+  const lastHealth = readLastHealth();
 
   return {
     appVersion: '0.1.0',
@@ -123,6 +136,13 @@ export function snapshot(): DiagnosticsSnapshot {
     accessTokenSecondsToExpiry: secondsToExpiry,
     refreshTokenStatus: auth.refreshToken ? 'present' : 'missing',
     refreshTokenPersisted: auth.stayLoggedIn,
+
+    healthUrl: lastHealth?.resolvedUrl ?? null,
+    healthOk: lastHealth ? lastHealth.ok : null,
+    healthLatencyMs: lastHealth?.latencyMs ?? null,
+    healthErrorClass: lastHealth?.errorClass ?? null,
+    healthErrorDetail: lastHealth?.errorDetail ?? null,
+    healthErrorStatus: lastHealth?.errorStatus ?? null,
 
     sqliteDbName: 'pos-desktop.db',
 
