@@ -22,6 +22,7 @@ import type {
   PushOutcome,
   SyncTransport,
 } from './transport';
+import { useAuthStore } from '@/store/auth';
 
 export interface HttpSyncTransportOptions {
   axios: AxiosInstance;
@@ -69,12 +70,26 @@ export function createHttpSyncTransport(opts: HttpSyncTransportOptions): SyncTra
     async pushEvents(envelopes: PushEnvelope[]): Promise<PushOutcome[]> {
       if (envelopes.length === 0) return [];
 
+      // Sprint 10 / G — backend's _handle_order_created REQUIRES
+      // restaurantId on the wire. The local SyncEvent envelope doesn't
+      // carry one (it's a per-tenant value, not a per-event one), so
+      // we inject it here from the auth store at push time. Without
+      // this, ORDER_CREATED is rejected as RESTAURANT_REQUIRED, and
+      // every later event (item, sent_to_kitchen, payment) fails with
+      // ORDER_NOT_FOUND because there's no server-side order to bind
+      // to — the symptom is "POS says sent, KDS shows nothing".
+      const auth = useAuthStore.getState();
+      const restaurantId = auth.selectedRestaurant?.id ?? null;
+      const tenantId = auth.tenant?.id ?? null;
+
       const body = {
         events: envelopes.map<ServerSyncEvent>((env) => ({
           mutationId: env.event.mutationId,
           type: env.event.type as string,
           payload: env.event.payload,
           deviceId: env.event.deviceId || undefined,
+          tenantId: tenantId || undefined,
+          restaurantId: restaurantId || undefined,
           orderLocalId: env.event.orderLocalId || undefined,
           createdAt: env.event.localTimestamp || undefined,
         })),
