@@ -153,29 +153,53 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
     return outcomes!;
   }
 
+  // Sprint 11.4 — pilot snapshot showed queueDepth: 33 with ZERO push
+  // attempts in backend logs and zero outboxWorker entries in the
+  // shipped diagnostic dump. Either tick wasn't running or pendingDue
+  // was masking events. We now log every tick (even with 0 due) and
+  // every loop iteration, so the next dump tells us precisely whether
+  // the worker is alive, what it sees, and where it stalls.
+  let _tickCounter = 0;
+
   const worker: OutboxWorker = {
     async tick(): Promise<PushOutcome[]> {
-      const due = await store.pendingDue(now());
-      if (due.length === 0) {
+      _tickCounter += 1;
+      const tickN = _tickCounter;
+      const t0 = Date.now();
+      let due: OutboxItem[] = [];
+      try {
+        due = await store.pendingDue(now());
+      } catch (err) {
+        dbgError('outboxWorker', `tick#${tickN} pendingDue threw`, {
+          message: (err as Error)?.message ?? String(err),
+        });
         onTick?.([]);
         return [];
       }
-      dbg('outboxWorker', 'tick — due batch', {
+      if (due.length === 0) {
+        // Always log the heartbeat — empty ticks are how we prove the
+        // loop is alive and the SELECT isn't masking events.
+        dbg('outboxWorker', `tick#${tickN} idle (0 due) ${Date.now() - t0}ms`);
+        onTick?.([]);
+        return [];
+      }
+      dbg('outboxWorker', `tick#${tickN} — due batch`, {
         due: due.length,
         types: due.map((d) => d.type),
+        firstAttempts: due.slice(0, 3).map((d) => d.attempts),
       });
       const groups = groupByOrder(due);
       let results: PushOutcome[][];
       try {
         results = await Promise.all(groups.map((g) => processBatch(g.items)));
       } catch (err) {
-        dbgError('outboxWorker', 'tick processBatch threw', {
+        dbgError('outboxWorker', `tick#${tickN} processBatch threw ${Date.now() - t0}ms`, {
           message: (err as Error)?.message ?? String(err),
         });
         throw err;
       }
       const flat = results.flat();
-      dbg('outboxWorker', 'tick done', {
+      dbg('outboxWorker', `tick#${tickN} done ${Date.now() - t0}ms`, {
         processed: flat.length,
         summary: flat.reduce<Record<string, number>>((acc, o) => {
           acc[o.status] = (acc[o.status] ?? 0) + 1;
@@ -189,15 +213,22 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
     start(intervalMs = 2_000): () => void {
       let stopped = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let loopIter = 0;
+      dbg('outboxWorker', 'start() called', { intervalMs });
       const loop = async () => {
         if (stopped) return;
+        loopIter += 1;
         try {
           await worker.tick();
-        } catch {
-          // Swallow; the next tick retries. Tests assert via `tick()` directly.
+        } catch (err) {
+          dbgError('outboxWorker', `loop#${loopIter} tick threw — chain continues`, {
+            message: (err as Error)?.message ?? String(err),
+          });
         }
         if (!stopped) {
           timer = setTimeout(loop, intervalMs);
+        } else {
+          dbg('outboxWorker', `loop#${loopIter} stopped — chain ends`);
         }
       };
       timer = setTimeout(loop, intervalMs);

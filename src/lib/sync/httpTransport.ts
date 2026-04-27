@@ -104,7 +104,10 @@ export function createHttpSyncTransport(opts: HttpSyncTransportOptions): SyncTra
         restaurantId: restaurantId || null,
       });
       try {
-        const r = await client.post<ServerResponse>(path, body);
+        // Sprint 11.4 — hard 30s timeout so a hung request can never
+        // block the worker.tick() chain (no further ticks fire until
+        // the previous returns).
+        const r = await client.post<ServerResponse>(path, body, { timeout: 30_000 });
         const results = r.data?.results ?? [];
         const byId = new Map(results.map((res) => [res.mutationId, res]));
         const outcomes = envelopes.map<PushOutcome>((env) => {
