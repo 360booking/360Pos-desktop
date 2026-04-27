@@ -49,6 +49,8 @@ import {
   type FlushOutcome,
 } from '@/lib/diagnostics/shipper';
 import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
+import { FiscalDiagnosticPanel } from './FiscalDiagnosticPanel';
+import { FiscalBridgePanel } from './FiscalBridgePanel';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
 
@@ -61,7 +63,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
   { key: 'cont', label: 'Cont & Sincronizare', icon: UserIcon, ready: true },
-  { key: 'fiscal', label: 'Casă de marcat', icon: Receipt, ready: false },
+  { key: 'fiscal', label: 'Casă de marcat', icon: Receipt, ready: true },
   { key: 'printer', label: 'Imprimante', icon: Printer, ready: false },
   { key: 'btpos', label: 'BT POS terminal', icon: Terminal, ready: false },
   { key: 'diagnostic', label: 'Diagnostic', icon: SettingsIcon, ready: true },
@@ -123,7 +125,12 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         <main className="flex-1 overflow-y-auto p-6">
           {tab === 'cont' && <ContSyncTab />}
-          {tab === 'fiscal' && <ComingSoonTab title="Casă de marcat" hint="Dialect Datecs/Tremol/Custom + COM port + raport Z. Vine în Val 2." />}
+          {tab === 'fiscal' && (
+            <div className="space-y-8">
+              <FiscalDiagnosticPanel />
+              <FiscalBridgePanel />
+            </div>
+          )}
           {tab === 'printer' && <ComingSoonTab title="Imprimante" hint="Imprimantă chitanțe + ticket bucătărie + autoprint la Trimite/plată. Vine în Val 2." />}
           {tab === 'btpos' && <ComingSoonTab title="BT POS terminal" hint="Configurare ECR + IP terminal. Așteaptă activarea ECR la BT pentru testare reală. Vine în Val 2." />}
           {tab === 'diagnostic' && <DiagnosticTab />}
@@ -499,6 +506,9 @@ function ResetSection() {
         'remote_order_items',
         'remote_orders',
         'card_recoveries',
+        'fiscal_attempts',
+        'payment_attempts',
+        'station_pairings',
         'tables',
         'products',
         'categories',

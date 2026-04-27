@@ -15,8 +15,24 @@ export interface FiscalDeviceAdapter {
 
   status(): Promise<FiscalStatus>;
   printReceipt(req: FiscalReceiptRequest): Promise<FiscalReceiptResponse>;
+  /** Sprint 2 / Q3 — storno / fiscal void. Optional so legacy adapters
+   *  not yet ported can throw NotImplemented at call time. */
+  cancelReceipt?(req: FiscalCancelRequest): Promise<FiscalReceiptResponse>;
   printZReport(): Promise<FiscalReportResponse>;
   printXReport(): Promise<FiscalReportResponse>;
+}
+
+export interface FiscalCancelRequest {
+  mutationId: string;
+  orderId: string;
+  fiscalAttemptId: string;
+  /** Original receipt fiscal number (BF) being voided. */
+  originalFiscalNumber: string;
+  /** Original receipt date `YYYY-MM-DD` — required by some Datecs firmwares. */
+  originalFiscalDate?: string;
+  lines: FiscalLine[];
+  payments: FiscalPayment[];
+  reason: string;
 }
 
 export interface FiscalStatus {

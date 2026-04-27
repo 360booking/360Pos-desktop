@@ -20,6 +20,8 @@
 import type { SqlExecutor } from '@/lib/db/executor';
 import {
   ROMANIAN_DEFAULT_VAT_BP,
+  type FiscalAttempt,
+  type FiscalAttemptStatus,
   type Order,
   type OrderItem,
   type OrderState,
@@ -56,6 +58,71 @@ interface RemoteItemJoin {
   kitchen_ticket_id: string | null;
   round_number: number | null;
   sent_at: string | null;
+}
+
+interface FiscalAttemptRow {
+  id: string;
+  mutation_id: string;
+  order_local_id: string;
+  device_id: string;
+  provider: string;
+  status: string;
+  fiscal_number: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const FISCAL_STATUS_VALUES: ReadonlySet<FiscalAttemptStatus> = new Set([
+  'pending',
+  'printed',
+  'failed',
+  'unknown',
+  'confirmed_failed',
+]);
+
+function coerceFiscalStatus(raw: string): FiscalAttemptStatus {
+  return (FISCAL_STATUS_VALUES.has(raw as FiscalAttemptStatus)
+    ? raw
+    : 'unknown') as FiscalAttemptStatus;
+}
+
+/**
+ * Pull persisted fiscal attempts for an order. Schema lives in
+ * `src/sql/migrations/0006_fiscal_attempts.sql`; rows are written by the Rust
+ * `fiscal_print_receipt` command (B9). Returning [] for un-paired/cold orders
+ * is fine — pos-core treats missing attempts as "no fiscalization yet".
+ */
+export async function loadFiscalAttempts(
+  exec: SqlExecutor,
+  orderLocalId: string,
+): Promise<FiscalAttempt[]> {
+  const rows = await exec.select<FiscalAttemptRow>(
+    `SELECT id, mutation_id, order_local_id, device_id, provider, status,
+            fiscal_number, error_code, error_message, created_at, updated_at
+       FROM fiscal_attempts
+      WHERE order_local_id = ?
+      ORDER BY created_at ASC`,
+    [orderLocalId],
+  );
+  return rows.map((row) => {
+    const status = coerceFiscalStatus(row.status);
+    const finished = status !== 'pending';
+    return {
+      id: row.id,
+      mutationId: row.mutation_id,
+      orderLocalId: row.order_local_id,
+      deviceId: row.device_id,
+      adapterId: row.provider,
+      status,
+      fiscalNumber: row.fiscal_number ?? null,
+      errorCode: row.error_code ?? null,
+      errorMessage: row.error_message ?? null,
+      startedAt: row.created_at,
+      finishedAt: finished ? row.updated_at : null,
+    } satisfies FiscalAttempt;
+  });
 }
 
 /** Maps backend `status` (draft|sent|preparing|ready|served|paid|...)
@@ -98,6 +165,8 @@ export async function loadOrderFromRemote(
     [orderId],
   );
 
+  const fiscalAttempts = await loadFiscalAttempts(exec, r.id);
+
   const items: OrderItem[] = itemRows.map((row) => ({
     id: row.id,
     mutationId: row.id, // remote items don't carry a separate mutation_id
@@ -131,7 +200,7 @@ export async function loadOrderFromRemote(
     subtotalCents: r.subtotal_cents ?? 0,
     vatCents: Math.max(0, (r.total_cents ?? 0) - (r.subtotal_cents ?? 0)),
     totalCents: r.total_cents ?? 0,
-    fiscalAttempts: [],
+    fiscalAttempts,
     fiscalReceipt: null,
     openedAt: r.opened_at ?? new Date().toISOString(),
     closedAt: r.closed_at,
