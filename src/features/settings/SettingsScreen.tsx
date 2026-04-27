@@ -16,6 +16,7 @@ import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Eraser,
   Loader2,
   LogOut,
   Printer,
@@ -31,6 +32,7 @@ import {
 import { useAuthStore } from '@/store/auth';
 import { logout as logoutCall } from '@/lib/api/auth';
 import { stopSyncEngine, getSyncEngine } from '@/lib/sync/bootstrap';
+import { initDb } from '@/lib/db';
 import { snapshot, type DiagnosticsSnapshot } from '@/lib/diagnostics';
 import {
   isDebugEnabled,
@@ -380,10 +382,132 @@ function DiagnosticTab() {
       </Section>
 
       <Section title="Locație fișiere locale">
-        <Field label="Bază de date SQLite" value={'%APPDATA%\\360booking-pos\\pos-desktop.db'} mono />
-        <Field label="Config" value={'%APPDATA%\\360booking-pos\\config.json'} mono />
+        <Field label="Bază de date SQLite" value={'%APPDATA%\\com.x360booking.pos\\pos-desktop.db'} mono />
+        <Field label="Config" value={'%APPDATA%\\com.x360booking.pos\\config.json'} mono />
       </Section>
+
+      <ResetSection />
     </div>
+  );
+}
+
+function ResetSection() {
+  const auth = useAuthStore();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<'idle' | 'ok' | 'err'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  async function reset() {
+    setBusy(true);
+    setErrorMsg(null);
+    try {
+      // 1. Best-effort logout call (server invalidates the refresh token).
+      try {
+        await logoutCall(auth.refreshToken);
+      } catch {
+        // ignore — we're tearing down anyway
+      }
+      // 2. Stop the engine — closes schedulers, detaches debug logger.
+      stopSyncEngine();
+      // 3. Drop and recreate every table the app owns. The next launch
+      //    re-runs the migrations from scratch in tauri-plugin-sql.
+      const db = await initDb();
+      const tables = [
+        'remote_kitchen_tickets',
+        'remote_order_items',
+        'remote_orders',
+        'card_recoveries',
+        'tables',
+        'products',
+        'categories',
+        'sync_outbox',
+        'events',
+        'sync_cursor',
+        'device_logs',
+        'settings',
+      ];
+      for (const t of tables) {
+        try {
+          await db.execute(`DELETE FROM ${t}`);
+        } catch {
+          // table might not exist on older schemas — keep going
+        }
+      }
+      // 4. Clear in-memory auth state. The user will land back on Login.
+      await auth.clear();
+      setResult('ok');
+    } catch (err) {
+      setErrorMsg((err as Error)?.message ?? String(err));
+      setResult('err');
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
+  return (
+    <Section title="Resetare aplicație">
+      <div className="rounded-xl border border-rose-400/30 bg-rose-500/5 p-4 space-y-3">
+        <div className="text-sm text-slate-200">
+          <div className="font-semibold inline-flex items-center gap-2 text-rose-200">
+            <Eraser className="h-4 w-4" /> Șterge toate datele locale
+          </div>
+          <div className="text-xs text-slate-400 mt-1">
+            Curăță cache-ul SQLite (catalog, comenzi locale, outbox, loguri),
+            deconectează contul și revine la ecranul de login. Util când ai
+            comenzi blocate în coadă sau vrei să pornești de la zero fără
+            reinstalare.
+          </div>
+        </div>
+        {!confirming && result === 'idle' && (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-rose-500/15 text-rose-200 border border-rose-400/30 hover:bg-rose-500/25"
+          >
+            <Eraser className="h-4 w-4" /> Resetare aplicație...
+          </button>
+        )}
+        {confirming && (
+          <div className="space-y-2">
+            <p className="text-sm text-rose-200 font-semibold">
+              Ești sigur? Toate datele locale (comenzi nesincronizate, cache,
+              loguri) vor fi șterse. Acțiune ireversibilă.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={reset}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-rose-500/30 text-rose-100 border border-rose-400/50 hover:bg-rose-500/50 disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eraser className="h-4 w-4" />}
+                Da, șterge tot
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-slate-700/50 text-slate-200 border border-white/10 hover:bg-slate-700"
+              >
+                Anulează
+              </button>
+            </div>
+          </div>
+        )}
+        {result === 'ok' && (
+          <div className="text-sm text-emerald-300 inline-flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4" /> Resetat. Vei fi redirecționat la login.
+          </div>
+        )}
+        {result === 'err' && (
+          <div className="text-sm text-rose-300 inline-flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" /> Eșuat: {errorMsg ?? 'eroare necunoscută'}
+          </div>
+        )}
+      </div>
+    </Section>
   );
 }
 
