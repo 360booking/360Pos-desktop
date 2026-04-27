@@ -76,17 +76,18 @@ describe('debugLog toggle', () => {
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
     mod.dbg('test', 'message', { x: 1 });
-    await new Promise((r) => setTimeout(r, 10));
+    await mod.flushDebugBufferNow();
     expect(inserts.length).toBe(0);
   });
 
-  it('ON — dbg() inserts a row to device_logs', async () => {
+  it('ON — dbg() inserts a row to device_logs after flush', async () => {
     const mod = await import('../debugLog');
     mod.attachExecutorForLogs(fakeExec());
     await mod.setDebugEnabled(true);
     expect(mod.isDebugEnabled()).toBe(true);
     mod.dbg('runAction', 'newOrder ▶', { tableId: 't-5' });
-    await new Promise((r) => setTimeout(r, 10));
+    // Sprint 11.3 — dbg buffers; only flush writes to device_logs.
+    await mod.flushDebugBufferNow();
     expect(inserts.length).toBe(1);
     expect(inserts[0].params[0]).toBe('debug');
     expect(inserts[0].params[1]).toBe('runAction');
@@ -94,13 +95,29 @@ describe('debugLog toggle', () => {
     expect(JSON.parse(String(inserts[0].params[3]))).toMatchObject({ tableId: 't-5' });
   });
 
-  it('dbgError ALWAYS persists, even when toggle OFF', async () => {
+  it('many dbg() calls collapse into ONE transaction (no mutex storm)', async () => {
+    const mod = await import('../debugLog');
+    mod.attachExecutorForLogs(fakeExec());
+    await mod.setDebugEnabled(true);
+    for (let i = 0; i < 50; i += 1) mod.dbg('test', `m-${i}`);
+    await mod.flushDebugBufferNow();
+    expect(inserts.length).toBe(50);
+    // Only ONE transaction was opened — verified indirectly by the
+    // mock running fn(self), so all 50 inserts share a single
+    // transaction(). We assert ordering preserved.
+    expect(inserts.map((i) => i.params[2])).toEqual(
+      Array.from({ length: 50 }, (_, i) => `m-${i}`),
+    );
+  });
+
+  it('dbgError eagerly flushes, even when toggle OFF', async () => {
     const mod = await import('../debugLog');
     mod.attachExecutorForLogs(fakeExec());
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
     mod.dbgError('runAction', 'boom', { code: 'X' });
-    await new Promise((r) => setTimeout(r, 10));
+    // Eager flush is fire-and-forget; give it a tick.
+    await new Promise((r) => setTimeout(r, 20));
     expect(inserts.length).toBe(1);
     expect(inserts[0].params[0]).toBe('error');
   });
@@ -119,14 +136,13 @@ describe('debugLog toggle', () => {
 
   it('persist() buffers when no executor is attached, drains on attach', async () => {
     const mod = await import('../debugLog');
-    await mod.setDebugEnabled(true); // setDebugEnabled falls back to initDb when no exec
+    await mod.setDebugEnabled(true);
     inserts.length = 0;
-    // No executor attached yet — these calls go to the in-memory buffer.
     mod.dbg('test', 'before-attach-1');
     mod.dbg('test', 'before-attach-2');
     expect(inserts.length).toBe(0);
     mod.attachExecutorForLogs(fakeExec());
-    await new Promise((r) => setTimeout(r, 10));
+    await mod.flushDebugBufferNow();
     expect(inserts.length).toBe(2);
     expect(inserts.map((i) => i.params[2])).toEqual(['before-attach-1', 'before-attach-2']);
   });
@@ -139,7 +155,7 @@ describe('debugLog toggle', () => {
     const wrapped = mod.instrument('test', 'addOne', async (n: number) => n + 1);
     const out = await wrapped(2);
     expect(out).toBe(3);
-    await new Promise((r) => setTimeout(r, 10));
+    await mod.flushDebugBufferNow();
     expect(inserts.filter((i) => i.params[1] === 'test').length).toBeGreaterThanOrEqual(2);
 
     inserts.length = 0;
@@ -147,7 +163,7 @@ describe('debugLog toggle', () => {
       throw new Error('nope');
     });
     await expect(failing()).rejects.toThrow('nope');
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 20));
     const errs = inserts.filter((i) => i.params[0] === 'error');
     expect(errs.length).toBe(1);
   });

@@ -105,17 +105,29 @@ export async function setDebugEnabled(on: boolean): Promise<void> {
   for (const fn of _listeners) fn(_enabled);
 }
 
-/** Internal: stage a row for `device_logs`. Failures swallowed — debug
- *  logging must NEVER block the caller.
+/**
+ * Sprint 11.3 — pilot reproduced UI freeze with dbQueueDepth 111 and
+ * outboxWorker logs entirely absent. Cause: each instrumented call site
+ * fires 1-3 dbg() calls, each enqueueing an INSERT INTO device_logs
+ * through the same FIFO mutex that serializes order writes, pulls and
+ * outbox pushes. Under load (a fast operator clicking) the mutex
+ * couldn't drain, persistBatch transactions never finished, the
+ * outbox worker never got its turn to read pendingDue, and push to the
+ * backend never happened. Diagnostic logging starved the production path.
  *
- *  When the engine has attached an executor (after hydrate) we write
- *  through it so the mutex serialises us with normal sync writes.
- *  Otherwise we buffer the row in memory until the engine attaches.
- *  We NEVER call `db.execute` directly from here — racing the
- *  underlying tauri-plugin-sql connection against the engine's
- *  hydrate transaction caused the "cannot commit - no transaction
- *  is active" failure on first launch.
+ * Fix: dbg() writes only to an in-memory ring buffer. A background
+ * flusher batches up to N rows into ONE multi-INSERT every FLUSH_MS so
+ * the mutex sees exactly one transaction per flush window.
+ *
+ * dbgError() still uses the buffer (no exception to the rule — errors
+ * during a UI freeze must not deadlock harder), but the buffer is
+ * priority-flushed when an error lands so we don't lose context.
  */
+const FLUSH_MS = 5_000;
+const FLUSH_MAX_BATCH = 200;
+let _flushTimer: ReturnType<typeof setInterval> | null = null;
+let _flushInflight = false;
+
 function persist(
   level: 'debug' | 'info' | 'warn' | 'error',
   source: string,
@@ -123,44 +135,71 @@ function persist(
   ctx?: unknown,
 ): void {
   const ctxJson = ctx == null ? null : JSON.stringify(ctx);
-  if (_exec == null) {
-    _buffer.push([level, source, message, ctxJson]);
-    if (_buffer.length > BUFFER_LIMIT) _buffer.shift();
-    return;
+  _buffer.push([level, source, message, ctxJson]);
+  if (_buffer.length > BUFFER_LIMIT) _buffer.shift();
+  if (level === 'error' && _exec) {
+    // Errors are rare — flush eagerly so the next "Trimite loguri"
+    // includes them even if the 5s flusher hasn't fired yet.
+    void flushBufferToDb();
   }
-  void _exec
-    .execute(
-      'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
-      [level, source, message, ctxJson],
-    )
-    .catch(() => {
-      // best-effort
-    });
+}
+
+async function flushBufferToDb(): Promise<void> {
+  if (_flushInflight) return;
+  if (_exec == null) return;
+  if (_buffer.length === 0) return;
+  _flushInflight = true;
+  try {
+    const exec = _exec;
+    while (_buffer.length > 0 && _exec === exec) {
+      const batch = _buffer.splice(0, Math.min(_buffer.length, FLUSH_MAX_BATCH));
+      // One transaction → one mutex acquisition → no per-row enqueue churn.
+      try {
+        await exec.transaction(async (tx) => {
+          for (const [level, source, message, ctxJson] of batch) {
+            await tx.execute(
+              'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
+              [level, source, message, ctxJson],
+            );
+          }
+        });
+      } catch {
+        // If the batch fails, drop it — diagnostic logging must NEVER
+        // backpressure the production path, even on retry.
+      }
+    }
+  } finally {
+    _flushInflight = false;
+  }
 }
 
 /** Engine startup hands us its executor once hydrate has committed.
- *  We drain whatever was buffered through the mutex now so the support
- *  dump still has the boot logs. */
+ *  Starts the periodic flusher so dbg() messages eventually land in
+ *  device_logs without per-call mutex contention. */
 export function attachExecutorForLogs(exec: SqlExecutor): void {
   _exec = exec;
-  if (_buffer.length === 0) return;
-  const drain = _buffer.splice(0, _buffer.length);
-  void (async () => {
-    for (const [level, source, message, ctxJson] of drain) {
-      try {
-        await exec.execute(
-          'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
-          [level, source, message, ctxJson],
-        );
-      } catch {
-        // swallow per-row; keep draining the rest
-      }
-    }
-  })();
+  if (_flushTimer == null) {
+    _flushTimer = setInterval(() => {
+      void flushBufferToDb();
+    }, FLUSH_MS);
+  }
+  // Drain the boot-time buffer in the background, but with the same
+  // batched-transaction strategy.
+  void flushBufferToDb();
 }
 
 export function detachExecutorForLogs(): void {
   _exec = null;
+  if (_flushTimer != null) {
+    clearInterval(_flushTimer);
+    _flushTimer = null;
+  }
+}
+
+/** Force a flush now (e.g. before "Trimite loguri" so the latest
+ *  in-memory lines reach device_logs before the shipper reads it). */
+export async function flushDebugBufferNow(): Promise<void> {
+  await flushBufferToDb();
 }
 
 /** Emit a debug line (no-op when disabled). Always also goes to console.

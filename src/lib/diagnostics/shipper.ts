@@ -15,6 +15,7 @@ import { initDb } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { postDiagnosticsDump, type DumpLogLine } from '@/lib/api/diagnostics';
 import { getDeviceId } from '@/lib/auth/storage';
+import { flushDebugBufferNow } from '@/lib/debugLog';
 
 const BATCH_SIZE = 200;
 const PRUNE_KEEP_SHIPPED = 1000; // keep last 1000 shipped rows on disk
@@ -60,6 +61,9 @@ export async function readLastShippedAt(): Promise<string | null> {
 }
 
 export async function flushNow(appVersion?: string): Promise<FlushOutcome> {
+  // Sprint 11.3 — drain the in-memory dbg buffer first so the shipment
+  // includes the most recent log lines (last 5s window).
+  await flushDebugBufferNow();
   let db;
   try {
     db = await initDb();
