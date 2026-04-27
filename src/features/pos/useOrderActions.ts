@@ -14,6 +14,7 @@
 import { useCallback, useMemo } from 'react';
 import {
   addItem,
+  cancelOrder,
   createOrder,
   registerCardPaymentResult,
   registerCashPayment,
@@ -220,6 +221,27 @@ export function useOrderActions() {
     setOrder(r.next);
   }, [order, setOrder]);
 
+  // Sprint 11.9 — mirror browser POS cancelOrder. The pos-core action
+  // already enforces "not fiscalised" + state-machine guard; the
+  // backend forwarder marks RestaurantOrder cancelled so the table
+  // frees up. We clear the cart locally on success so the operator
+  // lands back on the empty Tables view (same UX as web POS where
+  // setActiveOrderId(null) runs after cancel).
+  const cancelCurrentOrder = useCallback(
+    async (reason: string = 'anulat din POS') => {
+      if (!order) return;
+      const ctx = buildCtx();
+      try {
+        await runAction(() => cancelOrder(order, { reason }, ctx));
+        clear();
+      } catch (err) {
+        // surface to caller so the cart can show an alert
+        throw err;
+      }
+    },
+    [order, clear],
+  );
+
   // Sprint 7 — explicit cash with arbitrary amount (modal-driven).
   const payCashAmount = useCallback(
     async (amountCents: number, acceptOverTender = false) => {
@@ -273,6 +295,7 @@ export function useOrderActions() {
     decrementQuantity,
     removeItem,
     sendOrderToKitchen,
+    cancelCurrentOrder,
     clear,
   };
 }

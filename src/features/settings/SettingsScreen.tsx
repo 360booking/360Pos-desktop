@@ -323,17 +323,34 @@ function DiagnosticTab() {
   }
 
   function downloadLogs() {
+    // Sprint 11.9 — Tauri's WebView2 silently swallows blob URL
+    // downloads (no Save dialog ever appears). Workaround: open the
+    // text in a new top-level window so the operator can right-click
+    // → Save Page As, or copy from the visible textarea. The new
+    // window is sandboxed (about:blank + document.write) so it
+    // doesn't disturb the running engine in the parent webview.
     const text = exportLogsAsText();
     if (!text) return;
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pos-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const win = window.open('', '_blank', 'width=900,height=700');
+    if (!win) {
+      // Popup blocked / Tauri refused — fall back to clipboard so
+      // the operator still has a path forward.
+      void navigator.clipboard.writeText(text).then(() => {
+        alert(
+          'Browser-ul a blocat fereastra de export. Logurile au fost copiate în clipboard — deschide Notepad și apasă Ctrl+V.',
+        );
+      });
+      return;
+    }
+    const escaped = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    win.document.open();
+    win.document.write(
+      `<!doctype html><html><head><title>POS desktop logs — ${new Date().toLocaleString('ro-RO')}</title><style>body{margin:0;background:#0f172a;color:#f1f5f9;font-family:Consolas,Monaco,monospace;font-size:11px;padding:8px}textarea{width:100%;height:calc(100vh - 16px);background:#0f172a;color:#f1f5f9;border:0;outline:0;resize:none;font-family:inherit;font-size:inherit}</style></head><body><textarea readonly>${escaped}</textarea><script>document.querySelector('textarea').select();</script></body></html>`,
+    );
+    win.document.close();
   }
 
   return (

@@ -149,6 +149,16 @@ export function PosShell() {
           onDecrement={(id) => void actions.decrementQuantity(id)}
           onRemove={(id) => void actions.removeItem(id)}
           onSendToKitchen={() => void actions.sendOrderToKitchen()}
+          onCancel={() => {
+            if (!actions.order) return;
+            if (!confirm('Anulezi comanda? Nu se va mai factura.')) return;
+            void actions.cancelCurrentOrder().catch((err: unknown) => {
+              alert(
+                (err as { message?: string })?.message
+                  ?? 'Nu am putut anula comanda.',
+              );
+            });
+          }}
         />
       </div>
       {claimTarget && (
@@ -642,6 +652,7 @@ interface CartPaneProps {
   onDecrement: (itemId: string) => void;
   onRemove: (itemId: string) => void;
   onSendToKitchen: () => void;
+  onCancel: () => void;
 }
 
 function CartPane({
@@ -653,6 +664,7 @@ function CartPane({
   onDecrement,
   onRemove,
   onSendToKitchen,
+  onCancel,
 }: CartPaneProps) {
   // Show the *blended* effective rate so the label stays accurate when the
   // order mixes food (9%) and bar (19%) lines.
@@ -758,6 +770,20 @@ function CartPane({
           className="touch-target w-full rounded-xl py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-indigo-600/40 text-indigo-200 border border-indigo-400/20 disabled:opacity-50"
         >
           <CreditCard className="h-4 w-4" /> Card POS
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={
+            order == null
+            || order.state === 'paid'
+            || order.state === 'cancelled'
+            || order.state === 'closed'
+          }
+          className="touch-target w-full rounded-xl py-2.5 text-xs font-semibold inline-flex items-center justify-center gap-2 bg-rose-600/20 text-rose-200 border border-rose-400/30 hover:bg-rose-600/40 disabled:opacity-40"
+          title="Anulează comanda — eliberează masa"
+        >
+          <Trash2 className="h-3.5 w-3.5" /> Anulează
         </button>
       </div>
     </aside>
