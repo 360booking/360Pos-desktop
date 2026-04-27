@@ -164,7 +164,14 @@ export function createEventStore(db: SqlExecutor): EventStore {
         attempts: number;
         last_error: string | null;
       }>(
-        'SELECT id, mutation_id, type, payload_json, order_local_id, attempts, last_error FROM events JOIN sync_outbox ON sync_outbox.event_id = events.id WHERE events.status IN (?,?) AND sync_outbox.next_retry_at <= ? ORDER BY events.created_at ASC, events.id ASC',
+        // Sprint 11.6 — `last_error` exists on BOTH events and
+        // sync_outbox in 0001_init.sql; SQLite refused the unqualified
+        // SELECT with "ambiguous column name: last_error", which
+        // silently broke every outbox push since the columns were
+        // added. We want sync_outbox.last_error (per-attempt failure
+        // that drives backoff), not events.last_error (terminal). All
+        // columns are now fully qualified for safety.
+        'SELECT events.id AS id, events.mutation_id AS mutation_id, events.type AS type, events.payload_json AS payload_json, events.order_local_id AS order_local_id, sync_outbox.attempts AS attempts, sync_outbox.last_error AS last_error FROM events JOIN sync_outbox ON sync_outbox.event_id = events.id WHERE events.status IN (?,?) AND sync_outbox.next_retry_at <= ? ORDER BY events.created_at ASC, events.id ASC',
         ['pending', 'processing', nowIso],
       );
       return rows.map((r) => ({

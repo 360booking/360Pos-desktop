@@ -119,3 +119,43 @@ describe('eventStore.markSynced / scheduleRetry / markFailed / markDead', () => 
     expect(dump.events.find((e) => e.id === b.id)?.status).toBe('dead');
   });
 });
+
+describe('eventStore — Sprint 11.6 SQL safety', () => {
+  // Both `events` and `sync_outbox` declare a `last_error` column in
+  // 0001_init.sql. Real SQLite raises "ambiguous column name" if a
+  // JOIN selects it without table qualification — and we shipped that
+  // bug to the pilot for several days because the in-memory mock
+  // tolerates the unqualified form. This test guards against
+  // re-introducing it: every column referenced in pendingDue MUST be
+  // table-qualified.
+  it('pendingDue SQL does not reference `last_error` without a table prefix', () => {
+    const captured: string[] = [];
+    const exec = {
+      select: async (sql: string) => {
+        captured.push(sql);
+        return [];
+      },
+      execute: async () => ({ rowsAffected: 0, lastInsertId: 0 }),
+      transaction: async (fn: (tx: typeof exec) => Promise<unknown>) => fn(exec),
+    } as unknown as ReturnType<typeof createMemoryExecutor>;
+    const store = createEventStore(exec);
+    void store.pendingDue('2026-04-27T00:00:00Z');
+    expect(captured.length).toBe(1);
+    const sql = captured[0];
+    // Any standalone `last_error` (not preceded by `events.` or
+    // `sync_outbox.`) is a regression. Same check for `attempts`,
+    // which also exists on both tables.
+    const ambiguous = /(?<![A-Za-z0-9_.])(last_error|attempts)(?!\s+AS)/g;
+    const matches: string[] = [];
+    let m: RegExpExecArray | null;
+    const re = ambiguous;
+    while ((m = re.exec(sql)) !== null) {
+      const before = sql.slice(Math.max(0, m.index - 20), m.index);
+      // OK if it's the alias side ("AS last_error") or already qualified.
+      if (!/(events|sync_outbox)\.$/.test(before) && !/AS\s+$/i.test(before)) {
+        matches.push(`${before}<<${m[0]}>>`);
+      }
+    }
+    expect(matches, `unqualified column refs found: ${matches.join(' | ')}`).toEqual([]);
+  });
+});
