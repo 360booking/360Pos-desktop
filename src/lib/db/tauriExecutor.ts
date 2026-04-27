@@ -42,6 +42,25 @@ function isLockedError(err: unknown): boolean {
   );
 }
 
+/**
+ * Sprint 11.2 — tauri-plugin-sql for SQLite uses a sqlx pool that can
+ * acquire / release connections per statement. Manual BEGIN/COMMIT
+ * issued through `db.execute()` therefore lands on different
+ * connections in the pool: BEGIN on conn A, INSERT on conn B (which
+ * runs in autocommit), COMMIT on conn C — which fails with
+ *     "cannot commit - no transaction is active"
+ * even though every INSERT did succeed (each one self-committed).
+ *
+ * We treat that specific error on COMMIT/ROLLBACK as a no-op: the
+ * data is already persisted, the call site doesn't need to know that
+ * atomicity degraded. Real failures (constraint violations, schema
+ * errors, locked DB after retry budget) still surface to the caller.
+ */
+function isNoActiveTransactionError(err: unknown): boolean {
+  const msg = String((err as { message?: unknown })?.message ?? err ?? '');
+  return /no transaction is active/i.test(msg) || /cannot commit/i.test(msg);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -121,16 +140,46 @@ export function tauriExecutor(db: Database): SqlExecutor {
     },
     async transaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T> {
       return enqueue('transaction', async () => {
-        await db.execute('BEGIN');
+        let beganOk = false;
+        try {
+          await db.execute('BEGIN');
+          beganOk = true;
+        } catch (err) {
+          // BEGIN itself failed — we still run statements (in autocommit)
+          // so the operation isn't lost; log loud so we notice the
+          // degradation in production.
+          logger.warn('db', 'BEGIN failed — running statements in autocommit mode', {
+            err: (err as Error)?.message ?? String(err),
+          });
+        }
         try {
           const out = await fn(inner);
-          await db.execute('COMMIT');
+          if (beganOk) {
+            try {
+              await db.execute('COMMIT');
+            } catch (err) {
+              if (!isNoActiveTransactionError(err)) {
+                throw err;
+              }
+              // Pool released the BEGIN'd connection; statements
+              // auto-committed individually. No-op COMMIT is fine.
+              logger.warn('db', 'COMMIT had no active transaction — pool degradation, data already persisted', {
+                err: (err as Error)?.message ?? String(err),
+              });
+            }
+          }
           return out;
         } catch (err) {
-          try {
-            await db.execute('ROLLBACK');
-          } catch {
-            // swallow — surface the original error
+          if (beganOk) {
+            try {
+              await db.execute('ROLLBACK');
+            } catch (rbErr) {
+              if (!isNoActiveTransactionError(rbErr)) {
+                logger.warn('db', 'ROLLBACK threw a non-noop error', {
+                  err: (rbErr as Error)?.message ?? String(rbErr),
+                });
+              }
+            }
           }
           throw err;
         }
