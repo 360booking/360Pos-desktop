@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SqlExecutor } from '@/lib/db/executor';
 
-// We intercept initDb so the debugLog module can be tested without Tauri.
+// We intercept initDb AND build an in-memory SqlExecutor — Sprint 11.1
+// routes persist() through the attached executor (engine's mutex) and
+// only falls back to initDb for the toggle SELECT/UPDATE.
 const inserts: Array<{ sql: string; params: unknown[] }> = [];
 const settingsStore: Map<string, string> = new Map();
 
@@ -29,6 +32,33 @@ vi.mock('@/lib/db', () => ({
   })),
 }));
 
+function fakeExec(): SqlExecutor {
+  return {
+    async select<T = Record<string, unknown>>(sql: string, params: unknown[] = []) {
+      if (/FROM settings WHERE key = \?/.test(sql)) {
+        const k = String(params[0]);
+        const v = settingsStore.get(k);
+        return (v == null ? [] : [{ value_json: v }]) as T[];
+      }
+      return [] as T[];
+    },
+    async execute(sql: string, params: unknown[] = []) {
+      if (/INSERT INTO settings/.test(sql)) {
+        settingsStore.set(String(params[0]), String(params[1]));
+        return { rowsAffected: 1, lastInsertId: 1 };
+      }
+      if (/INSERT INTO device_logs/.test(sql)) {
+        inserts.push({ sql, params });
+        return { rowsAffected: 1, lastInsertId: inserts.length };
+      }
+      return { rowsAffected: 0, lastInsertId: 0 };
+    },
+    async transaction(fn) {
+      return fn(this as SqlExecutor);
+    },
+  };
+}
+
 beforeEach(() => {
   inserts.length = 0;
   settingsStore.clear();
@@ -42,20 +72,20 @@ afterEach(() => {
 describe('debugLog toggle', () => {
   it('default OFF — dbg() does not persist', async () => {
     const mod = await import('../debugLog');
+    mod.attachExecutorForLogs(fakeExec());
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
     mod.dbg('test', 'message', { x: 1 });
-    // microtask drain
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 10));
     expect(inserts.length).toBe(0);
   });
 
   it('ON — dbg() inserts a row to device_logs', async () => {
     const mod = await import('../debugLog');
+    mod.attachExecutorForLogs(fakeExec());
     await mod.setDebugEnabled(true);
     expect(mod.isDebugEnabled()).toBe(true);
     mod.dbg('runAction', 'newOrder ▶', { tableId: 't-5' });
-    // wait for the fire-and-forget insert
     await new Promise((r) => setTimeout(r, 10));
     expect(inserts.length).toBe(1);
     expect(inserts[0].params[0]).toBe('debug');
@@ -66,6 +96,7 @@ describe('debugLog toggle', () => {
 
   it('dbgError ALWAYS persists, even when toggle OFF', async () => {
     const mod = await import('../debugLog');
+    mod.attachExecutorForLogs(fakeExec());
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
     mod.dbgError('runAction', 'boom', { code: 'X' });
@@ -76,24 +107,39 @@ describe('debugLog toggle', () => {
 
   it('toggle persists across loads', async () => {
     const mod1 = await import('../debugLog');
+    mod1.attachExecutorForLogs(fakeExec());
     await mod1.setDebugEnabled(true);
-    // Re-import simulates restart.
     vi.resetModules();
     const mod2 = await import('../debugLog');
-    expect(mod2.isDebugEnabled()).toBe(false); // cached state cleared
+    expect(mod2.isDebugEnabled()).toBe(false);
+    mod2.attachExecutorForLogs(fakeExec());
     await mod2.loadDebugFlag();
     expect(mod2.isDebugEnabled()).toBe(true);
   });
 
+  it('persist() buffers when no executor is attached, drains on attach', async () => {
+    const mod = await import('../debugLog');
+    await mod.setDebugEnabled(true); // setDebugEnabled falls back to initDb when no exec
+    inserts.length = 0;
+    // No executor attached yet — these calls go to the in-memory buffer.
+    mod.dbg('test', 'before-attach-1');
+    mod.dbg('test', 'before-attach-2');
+    expect(inserts.length).toBe(0);
+    mod.attachExecutorForLogs(fakeExec());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(inserts.length).toBe(2);
+    expect(inserts.map((i) => i.params[2])).toEqual(['before-attach-1', 'before-attach-2']);
+  });
+
   it('instrument wraps and logs entry/exit/exception when ON', async () => {
     const mod = await import('../debugLog');
+    mod.attachExecutorForLogs(fakeExec());
     await mod.setDebugEnabled(true);
 
     const wrapped = mod.instrument('test', 'addOne', async (n: number) => n + 1);
     const out = await wrapped(2);
     expect(out).toBe(3);
     await new Promise((r) => setTimeout(r, 10));
-    // 2 inserts: entry + exit
     expect(inserts.filter((i) => i.params[1] === 'test').length).toBeGreaterThanOrEqual(2);
 
     inserts.length = 0;
@@ -102,7 +148,6 @@ describe('debugLog toggle', () => {
     });
     await expect(failing()).rejects.toThrow('nope');
     await new Promise((r) => setTimeout(r, 10));
-    // entry + error
     const errs = inserts.filter((i) => i.params[0] === 'error');
     expect(errs.length).toBe(1);
   });

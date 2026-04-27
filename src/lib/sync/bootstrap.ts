@@ -34,7 +34,13 @@ import { startHeartbeatScheduler, type HeartbeatScheduler } from './heartbeatSch
 import { rememberBootstrap } from './lastBootstrap';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
-import { isDebugEnabled, loadDebugFlag, onDebugToggle } from '@/lib/debugLog';
+import {
+  attachExecutorForLogs,
+  detachExecutorForLogs,
+  isDebugEnabled,
+  loadDebugFlag,
+  onDebugToggle,
+} from '@/lib/debugLog';
 import { startShipper, stopShipper } from '@/lib/diagnostics/shipper';
 
 type BootstrapListener = (r: RunBootstrapResult) => void;
@@ -137,10 +143,6 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
 
   const db = await initDb();
   const exec = tauriExecutor(db);
-  // Sprint 11 — load the persisted debug toggle ASAP so the very first
-  // runBootstrap / persistBatch call sites can already log into device_logs
-  // when debug is on.
-  await loadDebugFlag();
   const store = createEventStore(exec);
   const transport = buildTransport();
   const worker = createOutboxWorker({
@@ -180,6 +182,15 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
       _hydrating = false;
     }
   }
+
+  // Sprint 11.1 — only NOW, after the hydrate transaction has
+  // committed (or definitively failed and rolled back), do we attach
+  // the executor that the debug logger uses to persist its `dbg()`
+  // lines. Attaching earlier would have raced the underlying
+  // tauri-plugin-sql connection against hydrate's BEGIN/COMMIT and
+  // produced "cannot commit - no transaction is active".
+  attachExecutorForLogs(exec);
+  await loadDebugFlag();
 
   // STEP 2: now safe to start the periodic workers.
   const stopWorker = worker.start(2_000);
@@ -239,6 +250,7 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     heartbeatScheduler.stop();
     stopShipper();
     offDebugToggle();
+    detachExecutorForLogs();
     listeners.clear();
     pullListeners.clear();
     _schedulersStarted = false;

@@ -12,12 +12,31 @@
  */
 import { initDb } from '@/lib/db';
 import { logger } from '@/lib/logger';
+import type { SqlExecutor } from '@/lib/db/executor';
 
 const SETTINGS_KEY = 'debug.enabled';
 
 let _enabled = false;
 let _initialised = false;
 const _listeners = new Set<(on: boolean) => void>();
+
+/**
+ * Sprint 11.1 hot-fix — persist() writes were going to the underlying
+ * tauri-plugin-sql connection directly, bypassing the tauriExecutor's
+ * FIFO mutex. That made fire-and-forget INSERTs into `device_logs`
+ * race with the engine's hydrate transaction; in some interleavings
+ * the BEGIN landed but the catalog statements ran on a different
+ * connection, so the eventual COMMIT failed with
+ *   "cannot commit - no transaction is active".
+ *
+ * Fix: never touch the DB from persist() until startSyncEngine
+ * explicitly attaches the executor. Until then we hold log lines in
+ * a small ring buffer; the engine drains it through the mutex once
+ * hydrate is done.
+ */
+let _exec: SqlExecutor | null = null;
+const _buffer: Array<[string, string, string, string | null]> = [];
+const BUFFER_LIMIT = 1000;
 
 export function isDebugEnabled(): boolean {
   return _enabled;
@@ -28,16 +47,30 @@ export function onDebugToggle(fn: (on: boolean) => void): () => void {
   return () => _listeners.delete(fn);
 }
 
-/** One-shot read at engine startup. Safe to call before initDb resolves —
- *  it'll initialise the toggle to OFF and resync once the DB is ready. */
+/** Loads the persisted toggle. Goes through the attached executor
+ *  (engine's mutex) when available; falls back to a direct read only
+ *  when no executor is attached yet — at startup the engine itself
+ *  awaits this BEFORE attaching, but we still don't want to race the
+ *  hydrate transaction, so the engine now calls us AFTER hydrate
+ *  completes (see lib/sync/bootstrap.ts).
+ */
 export async function loadDebugFlag(): Promise<boolean> {
   try {
-    const db = await initDb();
-    const rows = await db.select<{ value_json: string }[]>(
-      'SELECT value_json FROM settings WHERE key = ?',
-      [SETTINGS_KEY],
-    );
-    const raw = rows[0]?.value_json ?? null;
+    let raw: string | null = null;
+    if (_exec) {
+      const rows = await _exec.select<{ value_json: string }>(
+        'SELECT value_json FROM settings WHERE key = ?',
+        [SETTINGS_KEY],
+      );
+      raw = rows[0]?.value_json ?? null;
+    } else {
+      const db = await initDb();
+      const rows = await db.select<{ value_json: string }[]>(
+        'SELECT value_json FROM settings WHERE key = ?',
+        [SETTINGS_KEY],
+      );
+      raw = rows[0]?.value_json ?? null;
+    }
     _enabled = raw === 'true' || raw === '1' || raw === '"true"';
   } catch {
     _enabled = false;
@@ -50,36 +83,84 @@ export async function loadDebugFlag(): Promise<boolean> {
 export async function setDebugEnabled(on: boolean): Promise<void> {
   _enabled = on;
   try {
-    const db = await initDb();
-    await db.execute(
-      `INSERT INTO settings (key, value_json) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
-                                      updated_at = datetime('now')`,
-      [SETTINGS_KEY, on ? 'true' : 'false'],
-    );
+    if (_exec) {
+      await _exec.execute(
+        `INSERT INTO settings (key, value_json) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                        updated_at = datetime('now')`,
+        [SETTINGS_KEY, on ? 'true' : 'false'],
+      );
+    } else {
+      const db = await initDb();
+      await db.execute(
+        `INSERT INTO settings (key, value_json) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                        updated_at = datetime('now')`,
+        [SETTINGS_KEY, on ? 'true' : 'false'],
+      );
+    }
   } catch (err) {
     logger.warn('debug', 'persist toggle failed', { err: String(err) });
   }
   for (const fn of _listeners) fn(_enabled);
 }
 
-/** Internal: write a row to the local `device_logs` table. Failures
- *  are swallowed — debug logging must NEVER block the caller. */
-async function persist(
+/** Internal: stage a row for `device_logs`. Failures swallowed — debug
+ *  logging must NEVER block the caller.
+ *
+ *  When the engine has attached an executor (after hydrate) we write
+ *  through it so the mutex serialises us with normal sync writes.
+ *  Otherwise we buffer the row in memory until the engine attaches.
+ *  We NEVER call `db.execute` directly from here — racing the
+ *  underlying tauri-plugin-sql connection against the engine's
+ *  hydrate transaction caused the "cannot commit - no transaction
+ *  is active" failure on first launch.
+ */
+function persist(
   level: 'debug' | 'info' | 'warn' | 'error',
   source: string,
   message: string,
   ctx?: unknown,
-): Promise<void> {
-  try {
-    const db = await initDb();
-    await db.execute(
-      'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
-      [level, source, message, ctx == null ? null : JSON.stringify(ctx)],
-    );
-  } catch {
-    // swallow — diagnostic logging is best-effort
+): void {
+  const ctxJson = ctx == null ? null : JSON.stringify(ctx);
+  if (_exec == null) {
+    _buffer.push([level, source, message, ctxJson]);
+    if (_buffer.length > BUFFER_LIMIT) _buffer.shift();
+    return;
   }
+  void _exec
+    .execute(
+      'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
+      [level, source, message, ctxJson],
+    )
+    .catch(() => {
+      // best-effort
+    });
+}
+
+/** Engine startup hands us its executor once hydrate has committed.
+ *  We drain whatever was buffered through the mutex now so the support
+ *  dump still has the boot logs. */
+export function attachExecutorForLogs(exec: SqlExecutor): void {
+  _exec = exec;
+  if (_buffer.length === 0) return;
+  const drain = _buffer.splice(0, _buffer.length);
+  void (async () => {
+    for (const [level, source, message, ctxJson] of drain) {
+      try {
+        await exec.execute(
+          'INSERT INTO device_logs (level, source, message, context_json) VALUES (?, ?, ?, ?)',
+          [level, source, message, ctxJson],
+        );
+      } catch {
+        // swallow per-row; keep draining the rest
+      }
+    }
+  })();
+}
+
+export function detachExecutorForLogs(): void {
+  _exec = null;
 }
 
 /** Emit a debug line (no-op when disabled). Always also goes to console.
