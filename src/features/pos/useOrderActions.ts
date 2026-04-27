@@ -30,6 +30,8 @@ import { useCurrentOrder } from '@/store/currentOrder';
 import { useCatalog } from '@/store/catalog';
 import { getConfig } from '@/lib/config';
 import type { ProductRow } from '@/lib/db/catalogQueries';
+import { loadOrderFromRemote } from '@/lib/sync/resumeOrder';
+import { getSyncEngine } from '@/lib/sync/bootstrap';
 
 function vatConfigDefault(): TenantVatConfig {
   // Sprint 4 / 1 stores bootstrap.vatConfig in the SQLite settings row,
@@ -79,6 +81,24 @@ export function useOrderActions() {
       );
       setOrder(r.next);
       return r.next;
+    },
+    [setOrder],
+  );
+
+  /**
+   * Sprint 11.8 — mirror the browser POS pattern (selectOrStartOnTable):
+   * if the table already has an open remote order, load it into the
+   * cart instead of creating a new draft. The resumed order keeps the
+   * server id, so any subsequent addItem / sendToKitchen events go
+   * against the existing RestaurantOrder server-side, not a duplicate.
+   */
+  const resumeOrder = useCallback(
+    async (orderId: string) => {
+      const engine = getSyncEngine();
+      if (!engine) return null;
+      const loaded = await loadOrderFromRemote(engine.exec, orderId);
+      if (loaded) setOrder(loaded);
+      return loaded;
     },
     [setOrder],
   );
@@ -244,6 +264,7 @@ export function useOrderActions() {
     order,
     newOrder,
     newOrderWithCustomer,
+    resumeOrder,
     addProduct,
     payCash,
     payCashAmount,

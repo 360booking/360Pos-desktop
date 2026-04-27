@@ -65,22 +65,63 @@ export function PosShell() {
     if (e) void useRecovery.getState().refresh(e.exec);
   }, []);
 
+  // Sprint 11.8 — auto-refresh the cart when the pull cycle brings
+  // updated state for the currently-active order (e.g. KDS marked it
+  // "ready", waiter on another device added a line). Mirrors browser
+  // POS behaviour where activeOrder is just .find() over the orders
+  // list, so any list refresh propagates instantly.
+  const remoteOrdersForRefresh = useRemote((s) => s.orders);
+  const activeOrderId = actions.order?.id ?? null;
+  useEffect(() => {
+    if (!activeOrderId) return;
+    const remote = remoteOrdersForRefresh.find((o) => o.id === activeOrderId);
+    if (!remote) return;
+    // Server says the order is closed/paid → drop it from the cart.
+    if (remote.is_open !== 1) {
+      actions.clear();
+      return;
+    }
+    // Otherwise re-load from remote to pick up status / new items.
+    void actions.resumeOrder(activeOrderId);
+    // We deliberately exclude `actions` from deps — the resumeOrder
+    // identity is stable across renders via useCallback, and including
+    // it would cause this effect to run on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrderId, remoteOrdersForRefresh]);
+
   function handleTablePick(tableId: string) {
-    const remote = useRemote.getState().orders.find((o) => o.table_id === tableId);
+    // Sprint 11.8 — match the browser POS pattern (selectOrStartOnTable):
+    // an open remote order on this table is RESUMED into the cart, not
+    // shadowed by a new draft. This stops the desktop from creating a
+    // duplicate RestaurantOrder server-side every time the operator
+    // taps an occupied table, and it brings the existing items
+    // (including the "Trimis" lock state per line) back into the cart
+    // so the "Trimite update (N)" button reflects reality.
+    const remote = useRemote
+      .getState()
+      .orders.find((o) => o.table_id === tableId && o.is_open === 1);
     if (remote && !remote.current_device_can_edit) {
       // Foreign-locked → don't auto-create a new draft, prompt for claim.
       setClaimTarget(remote);
+      return;
+    }
+    if (remote) {
+      void actions.resumeOrder(remote.id);
       return;
     }
     void actions.newOrder(tableId);
   }
 
   function onClaimedFromModal() {
+    const claimedId = claimTarget?.id ?? null;
     setClaimTarget(null);
     // Trigger a fresh pull so the cache flips currentDeviceCanEdit
     // immediately without waiting for the 8s tick.
     const engine = getSyncEngine();
     void engine?.pullScheduler.runNow();
+    // Sprint 11.8 — after claiming, resume the existing order into the
+    // cart (mirror browser POS behaviour: claim = take over editing).
+    if (claimedId) void actions.resumeOrder(claimedId);
   }
 
   return (
