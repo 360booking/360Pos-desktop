@@ -3,7 +3,13 @@ import { useDeviceStatus } from '@/store/deviceStatus';
 import { health } from '@/lib/api/client';
 import { fiscalBridgeStatus } from '@/lib/sidecar';
 import { getDb } from '@/lib/db';
-import { getFiscal, getPayment, getPrinter, configureAdapters } from '@/adapters';
+import {
+  getFiscal,
+  getPayment,
+  getPrinter,
+  configureAdapters,
+  enableRustFiscalIfAllowed,
+} from '@/adapters';
 import { getConfig } from '@/lib/config';
 import { logger } from '@/lib/logger';
 
@@ -24,6 +30,11 @@ export function useDeviceStatusBootstrap(): void {
 
   useEffect(() => {
     configureAdapters(getConfig());
+    void enableRustFiscalIfAllowed()
+      .then((on) => {
+        if (on) logger.info('adapters', 'Rust fiscal adapter promoted (FISCAL_USE_RUST=true)');
+      })
+      .catch((err) => logger.warn('adapters', 'enableRustFiscalIfAllowed failed', { err: String(err) }));
   }, []);
 
   useEffect(() => {

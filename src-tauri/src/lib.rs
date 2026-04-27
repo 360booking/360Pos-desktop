@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod fiscal;
+
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
 const MIGRATION_V2_EVENTS_ORDER_LINK: &str =
     include_str!("../../src/sql/migrations/0002_events_order_link.sql");
@@ -12,6 +14,8 @@ const MIGRATION_V4_REMOTE_ORDERS_OWNERSHIP: &str =
     include_str!("../../src/sql/migrations/0004_remote_orders_ownership.sql");
 const MIGRATION_V5_CARD_RECOVERY: &str =
     include_str!("../../src/sql/migrations/0005_card_recovery.sql");
+const MIGRATION_V6_FISCAL_ATTEMPTS: &str =
+    include_str!("../../src/sql/migrations/0006_fiscal_attempts.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -93,6 +97,12 @@ pub fn run() {
             sql: MIGRATION_V5_CARD_RECOVERY,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "fiscal_attempts + payment_attempts + station_pairings — Sprint 11",
+            sql: MIGRATION_V6_FISCAL_ATTEMPTS,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -104,12 +114,36 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:pos-desktop.db", migrations)
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![fiscal_bridge_status, app_data_dir])
+        .invoke_handler(tauri::generate_handler![
+            fiscal_bridge_status,
+            app_data_dir,
+            fiscal::commands::fiscal_use_rust_enabled,
+            fiscal::commands::fiscal_test_connection,
+            fiscal::commands::fiscal_get_status,
+            fiscal::commands::fiscal_print_receipt,
+            fiscal::commands::fiscal_cancel_receipt,
+            fiscal::commands::fiscal_request_z_confirm,
+            fiscal::commands::fiscal_print_z_report,
+            fiscal::commands::fiscal_record_payment_attempt,
+            fiscal::commands::fiscal_list_attempts,
+            fiscal::commands::fiscal_list_payment_attempts,
+            fiscal::commands::fiscal_probe,
+            fiscal::commands::fiscal_list_ports,
+            fiscal::commands::fiscal_bridge_claim,
+            fiscal::commands::fiscal_bridge_run,
+            fiscal::commands::fiscal_bridge_state,
+            fiscal::commands::fiscal_pull_config,
+            fiscal::commands::fiscal_get_cached_config,
+            fiscal::commands::fiscal_get_station_pairing,
+            fiscal::commands::fiscal_upsert_station_pairing,
+            fiscal::commands::fiscal_clear_station_pairing,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running 360booking POS");
 }

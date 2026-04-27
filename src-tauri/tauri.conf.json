@@ -46,5 +46,14 @@
       "nsis": { "displayLanguageSelector": true, "languages": ["English", "Romanian"] }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://360booking.ro/api/pos-desktop-updates/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
+    }
+  }
 }
