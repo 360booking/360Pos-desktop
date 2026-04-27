@@ -13,6 +13,7 @@ import {
   CloudDownload,
   LifeBuoy,
   Settings,
+  Sliders,
   LogOut,
   User as UserIcon,
 } from 'lucide-react';
@@ -83,9 +84,10 @@ function bootstrapStatus(lastSuccessfulAt: string | null): { level: StatusLevel;
 interface StatusBarProps {
   onOpenRecovery?: () => void;
   onOpenDiagnostics?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function StatusBar({ onOpenRecovery, onOpenDiagnostics }: StatusBarProps = {}) {
+export function StatusBar({ onOpenRecovery, onOpenDiagnostics, onOpenSettings }: StatusBarProps = {}) {
   const s = useDeviceStatus();
   const lastBootstrapAt = useCatalog((c) => c.lastSuccessfulAt);
   const recoveryCount = useRecovery((r) => r.rows.length);
@@ -140,6 +142,16 @@ export function StatusBar({ onOpenRecovery, onOpenDiagnostics }: StatusBarProps 
         />
       </div>
       <div className="flex items-center gap-2">
+        {onOpenSettings && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold text-violet-200 border border-violet-400/30 bg-violet-500/10 hover:bg-violet-500/20"
+            title="Setări"
+          >
+            <Sliders className="h-3 w-3" />
+          </button>
+        )}
         {onOpenDiagnostics && (
           <button
             type="button"

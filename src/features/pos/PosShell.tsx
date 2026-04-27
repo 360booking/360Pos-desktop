@@ -7,6 +7,7 @@ import { PaymentModal } from './PaymentModal';
 import { RecoveryTray } from './RecoveryTray';
 import { NewOrderSheet } from './NewOrderSheet';
 import { DiagnosticsModal } from './DiagnosticsModal';
+import { SettingsScreen } from '@/features/settings/SettingsScreen';
 import { useRecovery } from '@/store/recovery';
 import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
@@ -55,6 +56,7 @@ export function PosShell() {
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Hydrate the recovery list once on mount so the StatusBar pill
   // reflects pre-existing rows from a prior session.
@@ -86,6 +88,7 @@ export function PosShell() {
       <StatusBar
         onOpenRecovery={() => setRecoveryOpen(true)}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -134,6 +137,7 @@ export function PosShell() {
       )}
       {recoveryOpen && <RecoveryTray onClose={() => setRecoveryOpen(false)} />}
       {diagnosticsOpen && <DiagnosticsModal onClose={() => setDiagnosticsOpen(false)} />}
+      {settingsOpen && <SettingsScreen onClose={() => setSettingsOpen(false)} />}
       {newOrderOpen && (
         <NewOrderSheet
           onClose={() => setNewOrderOpen(false)}

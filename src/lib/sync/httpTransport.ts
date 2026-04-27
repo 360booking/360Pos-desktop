@@ -23,6 +23,7 @@ import type {
   SyncTransport,
 } from './transport';
 import { useAuthStore } from '@/store/auth';
+import { dbg, dbgError } from '@/lib/debugLog';
 
 export interface HttpSyncTransportOptions {
   axios: AxiosInstance;
@@ -95,13 +96,18 @@ export function createHttpSyncTransport(opts: HttpSyncTransportOptions): SyncTra
         })),
       };
 
+      const t0 = Date.now();
+      dbg('httpTransport', 'pushEvents ▶', {
+        count: envelopes.length,
+        types: envelopes.map((e) => e.event.type),
+        tenantId: tenantId || null,
+        restaurantId: restaurantId || null,
+      });
       try {
         const r = await client.post<ServerResponse>(path, body);
         const results = r.data?.results ?? [];
-        // Build a lookup so we honor server-returned ordering even if it
-        // differs from request order.
         const byId = new Map(results.map((res) => [res.mutationId, res]));
-        return envelopes.map<PushOutcome>((env) => {
+        const outcomes = envelopes.map<PushOutcome>((env) => {
           const res = byId.get(env.mutationId);
           if (!res) {
             return {
@@ -121,8 +127,24 @@ export function createHttpSyncTransport(opts: HttpSyncTransportOptions): SyncTra
             retryable: res.status === 'failed' ? true : undefined,
           };
         });
+        dbg('httpTransport', `pushEvents ◀ ${Date.now() - t0}ms`, {
+          summary: outcomes.reduce<Record<string, number>>((acc, o) => {
+            acc[o.status] = (acc[o.status] ?? 0) + 1;
+            return acc;
+          }, {}),
+          firstFailure: outcomes.find((o) => o.status === 'failed' || o.status === 'conflict') ?? null,
+        });
+        return outcomes;
       } catch (err) {
-        return mapErrorToOutcomes(envelopes, err);
+        const outcomes = mapErrorToOutcomes(envelopes, err);
+        dbgError('httpTransport', `pushEvents ✖ ${Date.now() - t0}ms`, {
+          message: (err as Error)?.message ?? String(err),
+          isAxios: axios.isAxiosError(err),
+          status: axios.isAxiosError(err) ? err.response?.status : null,
+          responseBody: axios.isAxiosError(err) ? err.response?.data : null,
+          firstOutcome: outcomes[0] ?? null,
+        });
+        return outcomes;
       }
     },
   };

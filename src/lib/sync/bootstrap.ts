@@ -34,6 +34,8 @@ import { startHeartbeatScheduler, type HeartbeatScheduler } from './heartbeatSch
 import { rememberBootstrap } from './lastBootstrap';
 import type { SqlExecutor } from '@/lib/db/executor';
 import type { SyncTransport } from './transport';
+import { isDebugEnabled, loadDebugFlag, onDebugToggle } from '@/lib/debugLog';
+import { startShipper, stopShipper } from '@/lib/diagnostics/shipper';
 
 type BootstrapListener = (r: RunBootstrapResult) => void;
 type PullListener = (r: RunPullResult) => void;
@@ -135,6 +137,10 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
 
   const db = await initDb();
   const exec = tauriExecutor(db);
+  // Sprint 11 — load the persisted debug toggle ASAP so the very first
+  // runBootstrap / persistBatch call sites can already log into device_logs
+  // when debug is on.
+  await loadDebugFlag();
   const store = createEventStore(exec);
   const transport = buildTransport();
   const worker = createOutboxWorker({
@@ -215,11 +221,24 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
 
   _schedulersStarted = true;
 
+  // Sprint 11 — auto-start the diagnostic-log shipper when debug is on,
+  // and react to user toggling it later. A 30s ticker is gentle enough
+  // to not interfere with normal sync.
+  if (isDebugEnabled()) {
+    startShipper(30_000);
+  }
+  const offDebugToggle = onDebugToggle((on) => {
+    if (on) startShipper(30_000);
+    else stopShipper();
+  });
+
   const stop = () => {
     stopWorker();
     bootstrapScheduler.stop();
     pullScheduler.stop();
     heartbeatScheduler.stop();
+    stopShipper();
+    offDebugToggle();
     listeners.clear();
     pullListeners.clear();
     _schedulersStarted = false;

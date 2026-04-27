@@ -11,6 +11,7 @@ import { fetchPullChanges, type PullChangesResponse } from '@/lib/api/pull';
 import { applyPullChanges, readPullCursor, type ApplyPullResult } from './applyPull';
 import { getConfig } from '@/lib/config';
 import type { SqlExecutor } from '@/lib/db/executor';
+import { dbg, dbgError } from '@/lib/debugLog';
 
 export interface RunPullOptions {
   exec: SqlExecutor;
@@ -24,24 +25,39 @@ export type RunPullResult =
 
 export async function runPull(opts: RunPullOptions): Promise<RunPullResult> {
   const fetcher = opts.fetcher ?? fetchPullChanges;
+  const t0 = Date.now();
   let cursor: string | null;
   try {
     cursor = await readPullCursor(opts.exec);
   } catch (err) {
+    dbgError('pull', 'readCursor ✖', { message: (err as Error)?.message ?? String(err) });
     return { ok: false, error: err as Error };
   }
   let pull: PullChangesResponse;
   try {
-    // Sprint 7 — pass deviceId so the backend can stamp
-    // currentDeviceCanEdit per row in the response.
     pull = await fetcher(cursor, getConfig().deviceId);
   } catch (err) {
+    dbgError('pull', `fetch ✖ ${Date.now() - t0}ms`, {
+      message: (err as Error)?.message ?? String(err),
+      cursor,
+    });
     return { ok: false, error: err as Error };
   }
   try {
     const summary = await applyPullChanges(opts.exec, pull);
+    dbg('pull', `runPull ◀ ${Date.now() - t0}ms`, {
+      orders: pull.changes?.orders?.length ?? 0,
+      orderItems: pull.changes?.orderItems?.length ?? 0,
+      kitchenTickets: pull.changes?.kitchenTickets?.length ?? 0,
+      cursorIn: cursor,
+      cursorOut: pull.nextCursor,
+    });
     return { ok: true, summary, pull };
   } catch (err) {
+    dbgError('pull', `applyPull ✖ ${Date.now() - t0}ms`, {
+      message: (err as Error)?.message ?? String(err),
+      stack: (err as Error)?.stack,
+    });
     return { ok: false, error: err as Error };
   }
 }

@@ -14,6 +14,7 @@
  */
 import type { Order, SyncEvent } from '@/core/pos-core';
 import type { EventStore } from './eventStore';
+import { dbg, dbgError } from '@/lib/debugLog';
 
 export interface DispatchEnv {
   store: EventStore;
@@ -41,12 +42,32 @@ export async function dispatchResult<R extends ActionLike<unknown>>(
   env: DispatchEnv = _env!,
 ): Promise<R> {
   if (!env) {
-    throw new Error('dispatch: configureDispatch() not called');
+    const err = new Error('dispatch: configureDispatch() not called');
+    dbgError('dispatch', 'dispatchResult: env is null — UI action will silently no-op', {
+      eventCount: result.events.length,
+    });
+    throw err;
   }
   if (result.events.length === 0) {
     return result;
   }
-  await env.store.persistBatch(result.events, env.now());
+  dbg('dispatch', 'persistBatch ▶', {
+    count: result.events.length,
+    types: result.events.map((e) => e.type),
+    mutationIds: result.events.map((e) => e.mutationId),
+  });
+  try {
+    await env.store.persistBatch(result.events, env.now());
+    dbg('dispatch', 'persistBatch ◀ ok', { count: result.events.length });
+  } catch (err) {
+    dbgError('dispatch', 'persistBatch ✖', {
+      message: (err as Error)?.message ?? String(err),
+      stack: (err as Error)?.stack,
+      count: result.events.length,
+      types: result.events.map((e) => e.type),
+    });
+    throw err;
+  }
   return result;
 }
 
@@ -60,7 +81,20 @@ export async function runAction<R extends ActionLike<unknown>>(
   fn: () => R,
   env: DispatchEnv = _env!,
 ): Promise<R> {
-  const result = fn();
+  let result: R;
+  try {
+    result = fn();
+  } catch (err) {
+    dbgError('runAction', 'pos-core action threw', {
+      message: (err as Error)?.message ?? String(err),
+      stack: (err as Error)?.stack,
+    });
+    throw err;
+  }
+  dbg('runAction', 'action ok', {
+    eventCount: result.events.length,
+    types: result.events.map((e) => e.type),
+  });
   return dispatchResult(result, env);
 }
 

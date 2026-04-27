@@ -27,6 +27,7 @@ import {
 } from './transport';
 import type { EventStore, OutboxItem } from './eventStore';
 import { nextRetryIso } from './backoff';
+import { dbg, dbgError } from '@/lib/debugLog';
 
 export interface OutboxWorker {
   /** Run one tick. Returns the outcomes processed (handy for tests). */
@@ -159,9 +160,28 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
         onTick?.([]);
         return [];
       }
+      dbg('outboxWorker', 'tick — due batch', {
+        due: due.length,
+        types: due.map((d) => d.type),
+      });
       const groups = groupByOrder(due);
-      const results = await Promise.all(groups.map((g) => processBatch(g.items)));
+      let results: PushOutcome[][];
+      try {
+        results = await Promise.all(groups.map((g) => processBatch(g.items)));
+      } catch (err) {
+        dbgError('outboxWorker', 'tick processBatch threw', {
+          message: (err as Error)?.message ?? String(err),
+        });
+        throw err;
+      }
       const flat = results.flat();
+      dbg('outboxWorker', 'tick done', {
+        processed: flat.length,
+        summary: flat.reduce<Record<string, number>>((acc, o) => {
+          acc[o.status] = (acc[o.status] ?? 0) + 1;
+          return acc;
+        }, {}),
+      });
       onTick?.(flat);
       return flat;
     },
