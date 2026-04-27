@@ -26,6 +26,9 @@ import {
   readLastBootstrapRestaurantId,
 } from '@/lib/sync/lastBootstrap';
 import { executorPendingDepth } from '@/lib/db/tauriExecutor';
+import { readRingBufferCount, isDebugEnabled } from '@/lib/debugLog';
+import { readLastPullDurationMs } from '@/lib/sync/runPull';
+import { readLastPersistBatchError } from '@/lib/sync/dispatch';
 
 export interface DiagnosticsSnapshot {
   // ─── App / config ─────────────────────────────────────────────────
@@ -129,6 +132,34 @@ export interface DiagnosticsSnapshot {
   // ─── Engine sanity ────────────────────────────────────────────────
   engineRunning: boolean;
   generatedAt: string;
+
+  // ─── Sprint 11.5 — outbox push observability ──────────────────────
+  /** ISO timestamp of the last outboxWorker.tick (alive heartbeat). */
+  outboxLastTickAt: string | null;
+  /** How many events the last tick saw as due. */
+  outboxLastDueCount: number;
+  /** ISO timestamp of the last push attempt to /api/pos/sync/push. */
+  outboxLastPushAttemptAt: string | null;
+  /** Status summary of the last push, e.g. "accepted:3,duplicate:1". */
+  outboxLastPushResult: string | null;
+  /** Last error from the worker, if any. */
+  outboxLastError: string | null;
+  /** Duration in ms of the last completed push call. */
+  lastPushDurationMs: number | null;
+  /** Duration in ms of the last completed pull call. */
+  lastPullDurationMs: number | null;
+  /** Last persistBatch error, if any (null when last batch succeeded). */
+  lastPersistBatchError: string | null;
+
+  // ─── Sprint 11.5 — debug logging mode ─────────────────────────────
+  /** Always 'memory' in 11.5+ (no SQLite path). */
+  loggingMode: 'memory';
+  /** Always false in 11.5+. */
+  sqliteDebugLogging: boolean;
+  /** Lines currently held in the in-memory ring buffer. */
+  ringBufferLogCount: number;
+  /** Whether the verbose-debug toggle is on. */
+  debugEnabled: boolean;
 }
 
 /** Tokens / secrets policy: keep them out entirely. We never include
@@ -242,6 +273,20 @@ export function snapshot(): DiagnosticsSnapshot {
 
     engineRunning: engine !== null,
     generatedAt: new Date().toISOString(),
+
+    outboxLastTickAt: engine?.worker.stats().lastTickAt ?? null,
+    outboxLastDueCount: engine?.worker.stats().lastDueCount ?? 0,
+    outboxLastPushAttemptAt: engine?.worker.stats().lastPushAttemptAt ?? null,
+    outboxLastPushResult: engine?.worker.stats().lastPushResult ?? null,
+    outboxLastError: engine?.worker.stats().lastError ?? null,
+    lastPushDurationMs: engine?.worker.stats().lastPushDurationMs ?? null,
+    lastPullDurationMs: readLastPullDurationMs(),
+    lastPersistBatchError: readLastPersistBatchError(),
+
+    loggingMode: 'memory',
+    sqliteDebugLogging: false,
+    ringBufferLogCount: readRingBufferCount(),
+    debugEnabled: isDebugEnabled(),
   };
 }
 

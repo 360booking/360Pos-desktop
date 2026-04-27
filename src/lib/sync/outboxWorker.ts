@@ -29,11 +29,31 @@ import type { EventStore, OutboxItem } from './eventStore';
 import { nextRetryIso } from './backoff';
 import { dbg, dbgError } from '@/lib/debugLog';
 
+export interface WorkerStats {
+  /** Total ticks attempted since worker.start() */
+  tickCount: number;
+  /** ISO timestamp of the last tick (alive heartbeat) */
+  lastTickAt: string | null;
+  /** How many events the last tick saw as due (0 = idle tick). */
+  lastDueCount: number;
+  /** ISO timestamp of the last push attempt (HTTP call to /sync/push). */
+  lastPushAttemptAt: string | null;
+  /** Status summary of the last push attempt, e.g.
+   *  "accepted:5" or "failed:1" or "transport_error:3". */
+  lastPushResult: string | null;
+  /** Last error from a tick or push, if any. Reset on next success. */
+  lastError: string | null;
+  /** Duration in ms of the last completed push call. */
+  lastPushDurationMs: number | null;
+}
+
 export interface OutboxWorker {
   /** Run one tick. Returns the outcomes processed (handy for tests). */
   tick(): Promise<PushOutcome[]>;
   /** Start the polling loop. Returns a stop function. */
   start(intervalMs?: number): () => void;
+  /** Read snapshot of current observability stats. */
+  stats(): WorkerStats;
 }
 
 export interface WorkerDeps {
@@ -91,10 +111,16 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
 
     const envelopes = batch.map(envelopeOf);
     let outcomes: PushOutcome[];
+    const pushStart = Date.now();
+    _lastPushAttemptAt = new Date().toISOString();
     try {
       outcomes = await transport.pushEvents(envelopes);
+      _lastPushDurationMs = Date.now() - pushStart;
     } catch (err) {
+      _lastPushDurationMs = Date.now() - pushStart;
       const e = err as Error;
+      _lastError = e.message;
+      _lastPushResult = `transport_error:${batch.length}`;
       // Transport-level failure: schedule retry for everyone in the batch.
       if (e instanceof TransportOfflineError || e instanceof TransportTimeoutError || true) {
         const nowIso = now();
@@ -111,6 +137,13 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
         return [];
       }
     }
+    const summary = (outcomes ?? []).reduce<Record<string, number>>((acc, o) => {
+      acc[o.status] = (acc[o.status] ?? 0) + 1;
+      return acc;
+    }, {});
+    _lastPushResult = Object.entries(summary)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(',') || 'empty';
 
     // Per-event handling.
     const byMutation = new Map(batch.map((it) => [it.mutationId, it]));
@@ -153,32 +186,36 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
     return outcomes!;
   }
 
-  // Sprint 11.4 — pilot snapshot showed queueDepth: 33 with ZERO push
-  // attempts in backend logs and zero outboxWorker entries in the
-  // shipped diagnostic dump. Either tick wasn't running or pendingDue
-  // was masking events. We now log every tick (even with 0 due) and
-  // every loop iteration, so the next dump tells us precisely whether
-  // the worker is alive, what it sees, and where it stalls.
+  // Sprint 11.5 — observability via in-memory stats (worker.stats()).
+  // Every tick / push attempt updates these so the diagnostics
+  // snapshot can show "did the worker run?" without parsing logs.
   let _tickCounter = 0;
+  let _lastTickAt: string | null = null;
+  let _lastDueCount = 0;
+  let _lastPushAttemptAt: string | null = null;
+  let _lastPushResult: string | null = null;
+  let _lastError: string | null = null;
+  let _lastPushDurationMs: number | null = null;
 
   const worker: OutboxWorker = {
     async tick(): Promise<PushOutcome[]> {
       _tickCounter += 1;
       const tickN = _tickCounter;
       const t0 = Date.now();
+      _lastTickAt = new Date().toISOString();
       let due: OutboxItem[] = [];
       try {
         due = await store.pendingDue(now());
       } catch (err) {
-        dbgError('outboxWorker', `tick#${tickN} pendingDue threw`, {
-          message: (err as Error)?.message ?? String(err),
-        });
+        const msg = (err as Error)?.message ?? String(err);
+        _lastError = msg;
+        dbgError('outboxWorker', `tick#${tickN} pendingDue threw`, { message: msg });
         onTick?.([]);
         return [];
       }
+      _lastDueCount = due.length;
       if (due.length === 0) {
-        // Always log the heartbeat — empty ticks are how we prove the
-        // loop is alive and the SELECT isn't masking events.
+        // RAM-only dbg now — safe to log every idle tick as a heartbeat.
         dbg('outboxWorker', `tick#${tickN} idle (0 due) ${Date.now() - t0}ms`);
         onTick?.([]);
         return [];
@@ -235,6 +272,18 @@ export function createOutboxWorker(deps: WorkerDeps): OutboxWorker {
       return () => {
         stopped = true;
         if (timer) clearTimeout(timer);
+      };
+    },
+
+    stats(): WorkerStats {
+      return {
+        tickCount: _tickCounter,
+        lastTickAt: _lastTickAt,
+        lastDueCount: _lastDueCount,
+        lastPushAttemptAt: _lastPushAttemptAt,
+        lastPushResult: _lastPushResult,
+        lastError: _lastError,
+        lastPushDurationMs: _lastPushDurationMs,
       };
     },
   };

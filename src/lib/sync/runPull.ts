@@ -13,6 +13,11 @@ import { getConfig } from '@/lib/config';
 import type { SqlExecutor } from '@/lib/db/executor';
 import { dbg, dbgError } from '@/lib/debugLog';
 
+let _lastPullDurationMs: number | null = null;
+export function readLastPullDurationMs(): number | null {
+  return _lastPullDurationMs;
+}
+
 export interface RunPullOptions {
   exec: SqlExecutor;
   /** Override the fetcher in tests. */
@@ -45,7 +50,8 @@ export async function runPull(opts: RunPullOptions): Promise<RunPullResult> {
   }
   try {
     const summary = await applyPullChanges(opts.exec, pull);
-    dbg('pull', `runPull ◀ ${Date.now() - t0}ms`, {
+    _lastPullDurationMs = Date.now() - t0;
+    dbg('pull', `runPull ◀ ${_lastPullDurationMs}ms`, {
       orders: pull.changes?.orders?.length ?? 0,
       orderItems: pull.changes?.orderItems?.length ?? 0,
       kitchenTickets: pull.changes?.kitchenTickets?.length ?? 0,
@@ -54,9 +60,9 @@ export async function runPull(opts: RunPullOptions): Promise<RunPullResult> {
     });
     return { ok: true, summary, pull };
   } catch (err) {
-    dbgError('pull', `applyPull ✖ ${Date.now() - t0}ms`, {
+    _lastPullDurationMs = Date.now() - t0;
+    dbgError('pull', `applyPull ✖ ${_lastPullDurationMs}ms`, {
       message: (err as Error)?.message ?? String(err),
-      stack: (err as Error)?.stack,
     });
     return { ok: false, error: err as Error };
   }

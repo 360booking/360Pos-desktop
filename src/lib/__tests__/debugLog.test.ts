@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SqlExecutor } from '@/lib/db/executor';
 
-// We intercept initDb AND build an in-memory SqlExecutor — Sprint 11.1
-// routes persist() through the attached executor (engine's mutex) and
-// only falls back to initDb for the toggle SELECT/UPDATE.
-const inserts: Array<{ sql: string; params: unknown[] }> = [];
+// Sprint 11.5 — debugLog is RAM-only. The only DB touch is the
+// settings.debug.enabled toggle (rare). dbg() / dbgError() must NOT
+// call any DB executor under any circumstance.
+
+const dbExecCalls: string[] = [];
+const dbSelectCalls: string[] = [];
 const settingsStore: Map<string, string> = new Map();
 
 vi.mock('@/lib/db', () => ({
   initDb: vi.fn(async () => ({
     select: vi.fn(async (sql: string, params: unknown[]) => {
+      dbSelectCalls.push(sql);
       if (/FROM settings WHERE key = \?/.test(sql)) {
         const k = String(params[0]);
         const v = settingsStore.get(k);
@@ -18,13 +20,10 @@ vi.mock('@/lib/db', () => ({
       return [];
     }),
     execute: vi.fn(async (sql: string, params: unknown[]) => {
+      dbExecCalls.push(sql);
       if (/INSERT INTO settings/.test(sql)) {
         settingsStore.set(String(params[0]), String(params[1]));
         return { rowsAffected: 1, lastInsertId: 1 };
-      }
-      if (/INSERT INTO device_logs/.test(sql)) {
-        inserts.push({ sql, params });
-        return { rowsAffected: 1, lastInsertId: inserts.length };
       }
       return { rowsAffected: 0, lastInsertId: 0 };
     }),
@@ -32,35 +31,9 @@ vi.mock('@/lib/db', () => ({
   })),
 }));
 
-function fakeExec(): SqlExecutor {
-  return {
-    async select<T = Record<string, unknown>>(sql: string, params: unknown[] = []) {
-      if (/FROM settings WHERE key = \?/.test(sql)) {
-        const k = String(params[0]);
-        const v = settingsStore.get(k);
-        return (v == null ? [] : [{ value_json: v }]) as T[];
-      }
-      return [] as T[];
-    },
-    async execute(sql: string, params: unknown[] = []) {
-      if (/INSERT INTO settings/.test(sql)) {
-        settingsStore.set(String(params[0]), String(params[1]));
-        return { rowsAffected: 1, lastInsertId: 1 };
-      }
-      if (/INSERT INTO device_logs/.test(sql)) {
-        inserts.push({ sql, params });
-        return { rowsAffected: 1, lastInsertId: inserts.length };
-      }
-      return { rowsAffected: 0, lastInsertId: 0 };
-    },
-    async transaction(fn) {
-      return fn(this as SqlExecutor);
-    },
-  };
-}
-
 beforeEach(() => {
-  inserts.length = 0;
+  dbExecCalls.length = 0;
+  dbSelectCalls.length = 0;
   settingsStore.clear();
   vi.resetModules();
 });
@@ -69,102 +42,102 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('debugLog toggle', () => {
-  it('default OFF — dbg() does not persist', async () => {
+describe('debugLog (Sprint 11.5 RAM-only)', () => {
+  it('dbg() never calls db.execute or db.select', async () => {
     const mod = await import('../debugLog');
-    mod.attachExecutorForLogs(fakeExec());
+    await mod.setDebugEnabled(true);
+    dbExecCalls.length = 0;
+    dbSelectCalls.length = 0;
+    for (let i = 0; i < 100; i += 1) mod.dbg('x', `m-${i}`, { i });
+    expect(dbExecCalls).toEqual([]);
+    expect(dbSelectCalls).toEqual([]);
+  });
+
+  it('dbgError() never calls db.execute or db.select', async () => {
+    const mod = await import('../debugLog');
+    dbExecCalls.length = 0;
+    dbSelectCalls.length = 0;
+    for (let i = 0; i < 100; i += 1) mod.dbgError('x', `m-${i}`, { i });
+    expect(dbExecCalls).toEqual([]);
+    expect(dbSelectCalls).toEqual([]);
+  });
+
+  it('dbg is no-op when toggle OFF', async () => {
+    const mod = await import('../debugLog');
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
-    mod.dbg('test', 'message', { x: 1 });
-    await mod.flushDebugBufferNow();
-    expect(inserts.length).toBe(0);
+    mod.dbg('x', 'should not appear');
+    expect(mod.readRingBuffer()).toEqual([]);
+    expect(mod.readRingBufferCount()).toBe(0);
   });
 
-  it('ON — dbg() inserts a row to device_logs after flush', async () => {
+  it('dbg pushes to ring buffer when toggle ON', async () => {
     const mod = await import('../debugLog');
-    mod.attachExecutorForLogs(fakeExec());
     await mod.setDebugEnabled(true);
-    expect(mod.isDebugEnabled()).toBe(true);
     mod.dbg('runAction', 'newOrder ▶', { tableId: 't-5' });
-    // Sprint 11.3 — dbg buffers; only flush writes to device_logs.
-    await mod.flushDebugBufferNow();
-    expect(inserts.length).toBe(1);
-    expect(inserts[0].params[0]).toBe('debug');
-    expect(inserts[0].params[1]).toBe('runAction');
-    expect(inserts[0].params[2]).toBe('newOrder ▶');
-    expect(JSON.parse(String(inserts[0].params[3]))).toMatchObject({ tableId: 't-5' });
+    const ring = mod.readRingBuffer();
+    expect(ring.length).toBe(1);
+    expect(ring[0].source).toBe('runAction');
+    expect(ring[0].message).toBe('newOrder ▶');
+    expect(ring[0].context).toMatchObject({ tableId: 't-5' });
+    expect(ring[0].level).toBe('debug');
   });
 
-  it('many dbg() calls collapse into ONE transaction (no mutex storm)', async () => {
+  it('dbgError pushes to ring even when toggle OFF', async () => {
     const mod = await import('../debugLog');
-    mod.attachExecutorForLogs(fakeExec());
-    await mod.setDebugEnabled(true);
-    for (let i = 0; i < 50; i += 1) mod.dbg('test', `m-${i}`);
-    await mod.flushDebugBufferNow();
-    expect(inserts.length).toBe(50);
-    // Only ONE transaction was opened — verified indirectly by the
-    // mock running fn(self), so all 50 inserts share a single
-    // transaction(). We assert ordering preserved.
-    expect(inserts.map((i) => i.params[2])).toEqual(
-      Array.from({ length: 50 }, (_, i) => `m-${i}`),
-    );
-  });
-
-  it('dbgError eagerly flushes, even when toggle OFF', async () => {
-    const mod = await import('../debugLog');
-    mod.attachExecutorForLogs(fakeExec());
     await mod.loadDebugFlag();
     expect(mod.isDebugEnabled()).toBe(false);
     mod.dbgError('runAction', 'boom', { code: 'X' });
-    // Eager flush is fire-and-forget; give it a tick.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(inserts.length).toBe(1);
-    expect(inserts[0].params[0]).toBe('error');
+    expect(mod.readRingBufferCount()).toBe(1);
+    expect(mod.readRingBuffer()[0].level).toBe('error');
   });
 
-  it('toggle persists across loads', async () => {
+  it('ring buffer is bounded at RING_BUFFER_MAX (5000)', async () => {
+    const mod = await import('../debugLog');
+    await mod.setDebugEnabled(true);
+    for (let i = 0; i < mod.RING_BUFFER_MAX + 200; i += 1) {
+      mod.dbg('x', `m-${i}`);
+    }
+    expect(mod.readRingBufferCount()).toBe(mod.RING_BUFFER_MAX);
+    // Oldest dropped — first remaining message should NOT be m-0.
+    expect(mod.readRingBuffer()[0].message).not.toBe('m-0');
+  });
+
+  it('clearRingBuffer empties everything', async () => {
+    const mod = await import('../debugLog');
+    await mod.setDebugEnabled(true);
+    mod.dbg('x', 'a');
+    mod.dbg('x', 'b');
+    expect(mod.readRingBufferCount()).toBe(2);
+    mod.clearRingBuffer();
+    expect(mod.readRingBufferCount()).toBe(0);
+  });
+
+  it('toggle persists across module reloads (only DB write allowed)', async () => {
     const mod1 = await import('../debugLog');
-    mod1.attachExecutorForLogs(fakeExec());
     await mod1.setDebugEnabled(true);
+    expect(dbExecCalls.length).toBe(1); // exactly one settings INSERT
+    expect(dbExecCalls[0]).toMatch(/INSERT INTO settings/);
     vi.resetModules();
     const mod2 = await import('../debugLog');
     expect(mod2.isDebugEnabled()).toBe(false);
-    mod2.attachExecutorForLogs(fakeExec());
     await mod2.loadDebugFlag();
     expect(mod2.isDebugEnabled()).toBe(true);
   });
 
-  it('persist() buffers when no executor is attached, drains on attach', async () => {
+  it('instrument logs entry/exit/error to ring without DB', async () => {
     const mod = await import('../debugLog');
     await mod.setDebugEnabled(true);
-    inserts.length = 0;
-    mod.dbg('test', 'before-attach-1');
-    mod.dbg('test', 'before-attach-2');
-    expect(inserts.length).toBe(0);
-    mod.attachExecutorForLogs(fakeExec());
-    await mod.flushDebugBufferNow();
-    expect(inserts.length).toBe(2);
-    expect(inserts.map((i) => i.params[2])).toEqual(['before-attach-1', 'before-attach-2']);
-  });
-
-  it('instrument wraps and logs entry/exit/exception when ON', async () => {
-    const mod = await import('../debugLog');
-    mod.attachExecutorForLogs(fakeExec());
-    await mod.setDebugEnabled(true);
-
-    const wrapped = mod.instrument('test', 'addOne', async (n: number) => n + 1);
-    const out = await wrapped(2);
-    expect(out).toBe(3);
-    await mod.flushDebugBufferNow();
-    expect(inserts.filter((i) => i.params[1] === 'test').length).toBeGreaterThanOrEqual(2);
-
-    inserts.length = 0;
+    dbExecCalls.length = 0;
+    const wrapped = mod.instrument('test', 'op', async () => 42);
+    expect(await wrapped()).toBe(42);
+    expect(dbExecCalls).toEqual([]);
+    expect(mod.readRingBufferCount()).toBeGreaterThanOrEqual(2);
     const failing = mod.instrument('test', 'fail', async () => {
       throw new Error('nope');
     });
     await expect(failing()).rejects.toThrow('nope');
-    await new Promise((r) => setTimeout(r, 20));
-    const errs = inserts.filter((i) => i.params[0] === 'error');
-    expect(errs.length).toBe(1);
+    expect(dbExecCalls).toEqual([]);
+    expect(mod.readRingBuffer().filter((r) => r.level === 'error').length).toBe(1);
   });
 });

@@ -16,6 +16,8 @@ import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  ClipboardCopy,
+  Download,
   Eraser,
   Loader2,
   LogOut,
@@ -43,8 +45,10 @@ import {
   flushNow,
   readPendingDumpCount,
   readLastShippedAt,
+  exportLogsAsText,
   type FlushOutcome,
 } from '@/lib/diagnostics/shipper';
+import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
 
@@ -272,15 +276,18 @@ function DiagnosticTab() {
   const [shipState, setShipState] = useState<'idle' | 'shipping' | 'ok' | 'err'>('idle');
   const [shipDetail, setShipDetail] = useState<FlushOutcome | null>(null);
   const [busyToggle, setBusyToggle] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'ok'>('idle');
+  const [snap, setSnap] = useState(() => snapshot11_5());
 
-  async function refreshCounts() {
-    setPendingCount(await readPendingDumpCount());
-    setLastShipped(await readLastShippedAt());
+  function refreshCounts() {
+    setPendingCount(readPendingDumpCount());
+    setLastShipped(readLastShippedAt());
+    setSnap(snapshot11_5());
   }
   useEffect(() => {
     void loadDebugFlag().then((on) => setEnabled(on));
-    void refreshCounts();
-    const i = setInterval(() => void refreshCounts(), 5_000);
+    refreshCounts();
+    const i = setInterval(refreshCounts, 3_000);
     return () => clearInterval(i);
   }, []);
 
@@ -300,7 +307,33 @@ function DiagnosticTab() {
     const out = await flushNow();
     setShipDetail(out);
     setShipState(out.errored ? 'err' : 'ok');
-    void refreshCounts();
+    refreshCounts();
+  }
+
+  async function copyLogs() {
+    const text = exportLogsAsText();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyState('ok');
+      setTimeout(() => setCopyState('idle'), 2000);
+    } catch {
+      // best-effort
+    }
+  }
+
+  function downloadLogs() {
+    const text = exportLogsAsText();
+    if (!text) return;
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pos-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -349,36 +382,67 @@ function DiagnosticTab() {
         </div>
       </Section>
 
-      <Section title="Trimitere la suport">
+      <Section title="Trimitere la suport (manual)">
         <div className="rounded-xl border border-white/10 bg-slate-900/40 p-4 space-y-3">
-          <Field label="Linii în așteptare" value={pendingCount} />
+          <Field label="Linii în memorie" value={pendingCount} />
+          <Field label="Mod logging" value="memory (RAM, fără SQLite)" />
           <Field label="Ultimul lot trimis" value={lastShipped ? new Date(lastShipped).toLocaleString('ro-RO') : '—'} />
-          <div className="pt-1 flex items-center gap-3">
+          <div className="pt-1 flex items-center flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={copyLogs}
+              disabled={pendingCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-slate-700/40 text-slate-200 border border-white/10 hover:bg-slate-700/60 disabled:opacity-40"
+            >
+              {copyState === 'ok' ? <CheckCircle2 className="h-4 w-4 text-emerald-300" /> : <ClipboardCopy className="h-4 w-4" />}
+              {copyState === 'ok' ? 'Copiat' : 'Copy logs'}
+            </button>
+            <button
+              type="button"
+              onClick={downloadLogs}
+              disabled={pendingCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-slate-700/40 text-slate-200 border border-white/10 hover:bg-slate-700/60 disabled:opacity-40"
+            >
+              <Download className="h-4 w-4" />
+              Export logs
+            </button>
             <button
               type="button"
               onClick={ship}
-              disabled={shipState === 'shipping'}
+              disabled={shipState === 'shipping' || pendingCount === 0}
               className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30 hover:bg-violet-500/25 disabled:opacity-50"
             >
               {shipState === 'shipping' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Trimite loguri la suport
+              Send diagnostics
             </button>
             {shipState === 'ok' && shipDetail && (
               <span className="inline-flex items-center gap-1 text-sm text-emerald-300">
-                <CheckCircle2 className="h-4 w-4" /> {shipDetail.shipped} linii livrate
+                <CheckCircle2 className="h-4 w-4" /> {shipDetail.shipped} livrate
               </span>
             )}
             {shipState === 'err' && shipDetail && (
               <span className="inline-flex items-center gap-1 text-sm text-rose-300">
-                <AlertTriangle className="h-4 w-4" /> Eșuat: {shipDetail.errorMessage ?? 'eroare necunoscută'}
+                <AlertTriangle className="h-4 w-4" /> {shipDetail.errorMessage ?? 'eșuat'}
               </span>
             )}
           </div>
           <p className="text-xs text-slate-500">
-            Logurile sunt anonimizate — niciun token sau parolă nu este trimis. Echipa suport le poate citi în
-            backend timp de 7 zile.
+            Logging-ul nu mai scrie în SQLite și nu se trimite automat — apasă butonul când vrei să trimiți. Tokenuri / parole nu sunt incluse.
           </p>
         </div>
+      </Section>
+
+      <Section title="Stare outbox + sync (live)">
+        <Field label="Outbox queue depth" value={snap.queueDepth} />
+        <Field label="DB queue depth (mutex)" value={snap.dbQueueDepth} />
+        <Field label="Last tick" value={snap.outboxLastTickAt ? new Date(snap.outboxLastTickAt).toLocaleTimeString('ro-RO') : '—'} />
+        <Field label="Last due count" value={snap.outboxLastDueCount} />
+        <Field label="Last push attempt" value={snap.outboxLastPushAttemptAt ? new Date(snap.outboxLastPushAttemptAt).toLocaleTimeString('ro-RO') : '—'} />
+        <Field label="Last push result" value={snap.outboxLastPushResult ?? '—'} />
+        <Field label="Last push duration" value={snap.lastPushDurationMs != null ? `${snap.lastPushDurationMs}ms` : '—'} />
+        <Field label="Last pull duration" value={snap.lastPullDurationMs != null ? `${snap.lastPullDurationMs}ms` : '—'} />
+        <Field label="Last persistBatch error" value={snap.lastPersistBatchError ?? '—'} />
+        <Field label="Last worker error" value={snap.outboxLastError ?? '—'} />
       </Section>
 
       <Section title="Locație fișiere locale">

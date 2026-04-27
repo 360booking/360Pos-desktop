@@ -16,6 +16,11 @@ import type { Order, SyncEvent } from '@/core/pos-core';
 import type { EventStore } from './eventStore';
 import { dbg, dbgError } from '@/lib/debugLog';
 
+let _lastPersistBatchError: string | null = null;
+export function readLastPersistBatchError(): string | null {
+  return _lastPersistBatchError;
+}
+
 export interface DispatchEnv {
   store: EventStore;
   now: () => string; // ISO
@@ -54,15 +59,15 @@ export async function dispatchResult<R extends ActionLike<unknown>>(
   dbg('dispatch', 'persistBatch ▶', {
     count: result.events.length,
     types: result.events.map((e) => e.type),
-    mutationIds: result.events.map((e) => e.mutationId),
   });
   try {
     await env.store.persistBatch(result.events, env.now());
+    _lastPersistBatchError = null;
     dbg('dispatch', 'persistBatch ◀ ok', { count: result.events.length });
   } catch (err) {
+    _lastPersistBatchError = (err as Error)?.message ?? String(err);
     dbgError('dispatch', 'persistBatch ✖', {
-      message: (err as Error)?.message ?? String(err),
-      stack: (err as Error)?.stack,
+      message: _lastPersistBatchError,
       count: result.events.length,
       types: result.events.map((e) => e.type),
     });
