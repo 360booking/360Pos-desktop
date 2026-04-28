@@ -126,12 +126,19 @@ impl DatecsDp25Provider {
     }
 
     fn build_open_fiscal(&self) -> Vec<u8> {
-        // <op>\t<pwd>\t<till>  — TAB-separated, ASCII. Comment in Python:
-        // FP-55/DP-25 uses TAB; an earlier comma version produced NAK on real
-        // hardware.
-        let payload = format!("{}\t{}\t1", self.cfg.operator, self.cfg.operator_password);
+        // DUDE capture (2026-04-28) showed the real payload is six TAB-
+        // separated fields, not three:
+        //   <op>\t<pwd>\t<till>\t\t\t
+        // The trailing three empty fields appear to be reserved for invoice
+        // number / customer info / EJ. Sending just three fields makes the
+        // firmware return error -111016 ("printed" status from our side
+        // because a frame echoes back, but no paper comes out).
+        let payload = format!(
+            "{}\t{}\t1\t\t\t",
+            self.cfg.operator, self.cfg.operator_password
+        );
         log::info!(
-            "Datecs DP-25 open_fiscal payload: '{}' (operator='{}' password='{}' till='1')",
+            "Datecs DP-25 open_fiscal payload: '{}' (operator='{}' password='{}' till='1' + 3 reserved empty)",
             payload.replace('\t', "\\t"),
             self.cfg.operator,
             self.cfg.operator_password,

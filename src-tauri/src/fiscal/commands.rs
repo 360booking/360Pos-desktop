@@ -723,6 +723,21 @@ pub fn fiscal_bridge_run(
     printer_model: String,
 ) -> Result<(), String> {
     let state = shared_state();
+    // Idempotency: if a WSS loop is already configured (or actively
+    // connected), refuse to spawn a second one. Two parallel loops show up
+    // on the backend as `replaced by another bridge` (close 4000) and force
+    // a reconnect storm — exactly the symptom seen during the auto-restart
+    // path running on top of an already-running loop. The auto-restart in
+    // the wizard now becomes a no-op once the loop is up.
+    if let Ok(s) = state.lock() {
+        if s.configured {
+            log::info!(
+                "fiscal_bridge_run: already configured (connected={}) — skip spawning a second loop",
+                s.connected
+            );
+            return Ok(());
+        }
+    }
     if let Ok(mut s) = state.lock() {
         s.configured = true;
     }
