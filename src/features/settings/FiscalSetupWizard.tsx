@@ -63,6 +63,22 @@ interface ClaimResponse {
   websocket_url: string;
 }
 
+interface ProbeAttempt {
+  dialect: string;
+  baud: number;
+  ok: boolean;
+  error: string | null;
+}
+
+interface ProbeReport {
+  port: string;
+  configured_baud: number;
+  attempts: ProbeAttempt[];
+  recommended_dialect: string | null;
+  recommended_baud: number | null;
+  all_nak_hint: boolean;
+}
+
 interface BridgeState {
   configured: boolean;
   connected: boolean;
@@ -147,6 +163,7 @@ export function FiscalSetupWizard() {
   const [pairTerminal, setPairTerminal] = useState('');
   const [pairBusy, setPairBusy] = useState(false);
   const [pairErr, setPairErr] = useState<string | null>(null);
+  const [probe, setProbe] = useState<AsyncState<ProbeReport>>({ state: 'idle' });
 
   const deviceId = getConfig().deviceId ?? '';
 
@@ -343,6 +360,25 @@ export function FiscalSetupWizard() {
       setPairErr(String(e));
     } finally {
       setPairBusy(false);
+    }
+  }
+
+  async function runProbe() {
+    setProbe({ state: 'busy' });
+    try {
+      const r = await invoke<ProbeReport>('fiscal_probe', {
+        port: hw.serial_port ?? null,
+        baud: hw.baud ?? null,
+      });
+      setProbe({ state: 'ok', value: r });
+      logger.info('fiscal-setup', 'probe done', {
+        all_nak_hint: r.all_nak_hint,
+        recommended_dialect: r.recommended_dialect,
+        recommended_baud: r.recommended_baud,
+        attempts: r.attempts.length,
+      });
+    } catch (err) {
+      setProbe({ state: 'err', error: String(err) });
     }
   }
 
@@ -772,6 +808,73 @@ export function FiscalSetupWizard() {
               </button>
             </div>
             {pairErr && <pre className="text-xs text-rose-300 font-mono whitespace-pre-wrap">{pairErr}</pre>}
+          </section>
+
+          <section className="rounded-lg border border-white/10 bg-slate-900/40 p-3 space-y-2 text-xs">
+            <h4 className="text-slate-200 font-semibold inline-flex items-center gap-2">
+              <Wifi className="h-3.5 w-3.5" /> Probe casă (sweep dialect × baud)
+            </h4>
+            <p className="text-slate-400">
+              Încearcă FP-55 + FP-700 pe baud-urile uzuale (9600, 19200, 38400, 57600, 115200) și raportează ce a răspuns.
+              Dacă <strong>toate</strong> dau NAK = casa nu e validată ANAF (deși acum a fost verificată — atunci probabil
+              parolă operator greșită sau dialect greșit pentru firmware-ul ăsta).
+            </p>
+            <button
+              type="button"
+              onClick={() => void runProbe()}
+              disabled={probe.state === 'busy' || !hw.serial_port}
+              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30 hover:bg-violet-500/25 disabled:opacity-50"
+            >
+              {probe.state === 'busy' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wifi className="h-3.5 w-3.5" />}
+              Rulează probe ({hw.serial_port ?? 'fără port'})
+            </button>
+            {probe.state === 'ok' && (
+              <div className="space-y-2">
+                <div className="rounded bg-slate-950/60 border border-white/10 p-2">
+                  <div className="text-slate-300 mb-1">
+                    Port: <code>{probe.value.port}</code> · baud configurat: <code>{probe.value.configured_baud}</code>
+                  </div>
+                  {probe.value.recommended_dialect && probe.value.recommended_baud ? (
+                    <div className="text-emerald-300 font-semibold">
+                      ✓ Combinație care răspunde: dialect={probe.value.recommended_dialect}, baud={probe.value.recommended_baud}
+                      <div className="text-[11px] text-emerald-200/80 font-normal mt-0.5">
+                        Setează în Pasul 1 → variantă protocol „{probe.value.recommended_dialect === 'fp700' ? 'FP-700' : 'FP-55'}", baud {probe.value.recommended_baud}, salvează.
+                      </div>
+                    </div>
+                  ) : probe.value.all_nak_hint ? (
+                    <div className="text-rose-300 font-semibold">
+                      ✗ Toate combo-urile au dat NAK.
+                      <div className="text-[11px] text-rose-200/80 font-normal mt-0.5">
+                        Cauze posibile (în ordinea probabilității): operator/parolă greșite (cere tehnicianului ANAF ce a setat după verificare); firmware folosește alt dialect proprietar; bon deschis pe casă (rezolvi din meniul casei). Vezi memoria <code>feedback_fiscal_printer_nak_all_combos</code>.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-amber-300">Niciun răspuns OK; vezi detaliile.</div>
+                  )}
+                </div>
+                <details>
+                  <summary className="cursor-pointer text-slate-300 hover:text-slate-100">Detalii per combo ({probe.value.attempts.length})</summary>
+                  <table className="mt-2 w-full text-[11px]">
+                    <thead className="text-slate-400 border-b border-white/10">
+                      <tr><th className="text-left py-1 pr-2">dialect</th><th className="text-left py-1 pr-2">baud</th><th className="text-left py-1 pr-2">rezultat</th><th className="text-left py-1">eroare</th></tr>
+                    </thead>
+                    <tbody>
+                      {probe.value.attempts.map((a, i) => (
+                        <tr key={i} className={a.ok ? 'text-emerald-300' : 'text-slate-400'}>
+                          <td className="py-0.5 pr-2 font-mono">{a.dialect}</td>
+                          <td className="py-0.5 pr-2 font-mono">{a.baud}</td>
+                          <td className="py-0.5 pr-2">{a.ok ? '✓ OK' : '✗ fail'}</td>
+                          <td className="py-0.5 text-rose-300">{a.error ?? ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
+              </div>
+            )}
+            {probe.state === 'err' && (
+              <pre className="text-xs text-rose-300 font-mono whitespace-pre-wrap">{probe.error}</pre>
+            )}
           </section>
 
           <p className="text-[11px] text-slate-500">
