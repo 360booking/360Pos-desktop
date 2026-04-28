@@ -147,18 +147,48 @@ impl DatecsDp25Provider {
     }
 
     fn build_register_item(item: &ReceiptItem) -> Vec<u8> {
+        // DUDE capture (TX 528) shape:
+        //   <name>\t<vat_id>\t<price>\t<qty>\t<dept>\t<discount>\t<disc_type>\t<unit>\t
+        // - vat_id is a NUMBER (1..5), NOT the legacy "T<A..D>" letter.
+        // - dept/discount/disc_type are populated by DUDE with `4`, `0.01`,
+        //   `2` for the test sale; the `4` looks like a department-id
+        //   placeholder that the firmware accepts as "default", and the
+        //   discount fields can be zero. We use safe defaults: dept=0
+        //   (firmware default), discount=0.00, disc_type=0 (no discount).
+        // - unit defaults to "buc" when the receipt line doesn't specify.
+        // - trailing TAB is required (firmware expects 9 fields, last empty).
         let name = Self::truncate(item.name.as_str(), 36);
-        let group = vat::rate_to_group(item.vat_rate);
+        let vat_id = vat::rate_to_dp25x_id(item.vat_rate);
         let price = Self::fmt_amount(item.unit_price);
         let qty = Self::fmt_amount(item.quantity);
-        let line = format!("{}\tT{}\t{}\t{}", name, group, price, qty);
+        let dept = "0";
+        let discount = "0.00";
+        let disc_type = "0";
+        let unit = "buc";
+        let line = format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t",
+            name, vat_id, price, qty, dept, discount, disc_type, unit
+        );
+        log::info!(
+            "Datecs DP-25 register_item payload: '{}'",
+            line.replace('\t', "\\t")
+        );
         Self::cp1250(&line)
     }
 
     fn build_payment(p: &ReceiptPayment) -> Vec<u8> {
+        // DUDE capture (TX 608) shape: `<code>\t<amount>\t` (3 fields,
+        // trailing one empty/reserved). Empty amount → firmware uses the
+        // bon total automatically; we still send it explicitly so the
+        // operator sees the exact amount they typed.
         let code = payment::method_to_code(&p.method);
         let amount = Self::fmt_amount(p.amount);
-        format!("{}\t{}", code, amount).into_bytes()
+        let line = format!("{}\t{}\t", code, amount);
+        log::info!(
+            "Datecs DP-25 payment payload: '{}'",
+            line.replace('\t', "\\t")
+        );
+        line.into_bytes()
     }
 
     /// Storno open payload — Datecs FP-55 §3.5: `<op>\t<pwd>\t1\tS\t<BF>` with
