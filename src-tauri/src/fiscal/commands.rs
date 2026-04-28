@@ -28,6 +28,7 @@ use crate::fiscal::persist::{
     self, AttemptContext, FiscalAttemptRow, PaymentAttemptRow, StationPairingRow,
 };
 use crate::fiscal::providers;
+use crate::fiscal::runtime_config::{self, RuntimeConfig};
 use std::time::{Duration, Instant};
 
 static BRIDGE_STATE: OnceLock<SharedState> = OnceLock::new();
@@ -56,42 +57,50 @@ fn shared_state() -> SharedState {
         .clone()
 }
 
-fn provider_name() -> String {
-    std::env::var("FISCAL_PROVIDER").unwrap_or_else(|_| "simulator".into())
-}
-
-fn use_rust_enabled() -> bool {
-    matches!(
-        std::env::var("FISCAL_USE_RUST").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
-}
-
-fn raw_logging_enabled() -> bool {
-    matches!(
-        std::env::var("FISCAL_ENABLE_RAW_LOGS").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
-}
-
-fn env_opt(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|s| !s.is_empty())
+fn load_runtime_config(app: &tauri::AppHandle) -> RuntimeConfig {
+    // Best-effort. When the DB is missing or unreadable (first launch before
+    // any migration ran, broken APPDATA), fall back to a default config so
+    // env-var-only paths keep working.
+    persist::db_path(app)
+        .ok()
+        .and_then(|p| runtime_config::read(&p).ok())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn fiscal_use_rust_enabled() -> bool {
-    use_rust_enabled()
+pub fn fiscal_use_rust_enabled(app: tauri::AppHandle) -> bool {
+    runtime_config::effective_use_rust(&load_runtime_config(&app))
 }
 
 #[tauri::command]
-pub fn fiscal_test_connection() -> Result<TestResult, String> {
-    let p = providers::build(&provider_name()).map_err(|e| e.to_string())?;
+pub fn fiscal_get_runtime_config(app: tauri::AppHandle) -> Result<RuntimeConfig, String> {
+    let path = persist::db_path(&app).map_err(|e| e.to_string())?;
+    runtime_config::read(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_set_runtime_config(
+    app: tauri::AppHandle,
+    config: RuntimeConfig,
+) -> Result<RuntimeConfig, String> {
+    let path = persist::db_path(&app).map_err(|e| e.to_string())?;
+    runtime_config::write(&path, &config).map_err(|e| e.to_string())?;
+    runtime_config::read(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_test_connection(app: tauri::AppHandle) -> Result<TestResult, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.test_connection().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn fiscal_get_status() -> Result<FiscalStatus, String> {
-    let p = providers::build(&provider_name()).map_err(|e| e.to_string())?;
+pub fn fiscal_get_status(app: tauri::AppHandle) -> Result<FiscalStatus, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.get_status().map_err(|e| e.to_string())
 }
 
@@ -108,8 +117,9 @@ pub fn fiscal_print_receipt(
     request: ReceiptRequest,
     device_id: Option<String>,
 ) -> Result<ReceiptResponse, String> {
-    let provider_name = provider_name();
-    let p = providers::build(&provider_name).map_err(|e| e.to_string())?;
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     let res = p.print_receipt(request.clone()).map_err(|e| e.to_string())?;
 
     // Persist on a best-effort basis — a failed write must not mask a successful
@@ -120,32 +130,28 @@ pub fn fiscal_print_receipt(
                 let paired = persist::read_paired_fiscal_device(&path, dev_id)
                     .ok()
                     .flatten();
-                let env_printer_model = env_opt("FISCAL_PRINTER_MODEL");
-                let env_serial_port = env_opt("FISCAL_SERIAL_PORT");
-                let env_protocol_variant = env_opt("FISCAL_PROTOCOL_VARIANT");
                 let printer_model_default: Option<&'static str> =
                     match provider_name.as_str() {
                         "datecs_dp25" => Some("Datecs DP-25"),
                         "simulator" => Some("Simulator"),
                         _ => None,
                     };
-                let printer_model: Option<&str> = env_printer_model
+                let pm_db = runtime_config::effective_printer_model(&cfg);
+                let printer_model: Option<&str> = pm_db
                     .as_deref()
                     .or(printer_model_default);
-                let serial_port: Option<&str> = env_serial_port.as_deref();
-                let protocol_variant: Option<&str> = env_protocol_variant.as_deref();
-                let baud = std::env::var("FISCAL_BAUD_RATE")
-                    .ok()
-                    .and_then(|s| s.parse().ok());
+                let serial_port = runtime_config::effective_serial_port(&cfg);
+                let protocol_variant = runtime_config::effective_protocol_variant(&cfg);
+                let baud_value = runtime_config::effective_baud(&cfg) as i64;
                 let ctx = AttemptContext {
                     device_id: dev_id,
                     provider: &provider_name,
                     printer_model,
-                    serial_port,
-                    baud,
-                    protocol_variant,
+                    serial_port: serial_port.as_deref(),
+                    baud: Some(baud_value),
+                    protocol_variant: protocol_variant.as_deref(),
                     fiscal_device_id: paired,
-                    raw_logging: raw_logging_enabled(),
+                    raw_logging: runtime_config::effective_raw_logs(&cfg),
                 };
                 let row = persist::attempt_row_from_response(&request, &res, &ctx);
                 if let Err(e) = persist::record_fiscal_attempt(&path, &row) {
@@ -174,8 +180,9 @@ pub fn fiscal_cancel_receipt(
     request: CancelReceiptRequest,
     device_id: Option<String>,
 ) -> Result<ReceiptResponse, String> {
-    let provider_name = provider_name();
-    let p = providers::build(&provider_name).map_err(|e| e.to_string())?;
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     let res = p.cancel_receipt(request.clone()).map_err(|e| e.to_string())?;
 
     if let Some(dev_id) = device_id.as_deref() {
@@ -196,30 +203,28 @@ pub fn fiscal_cancel_receipt(
                 customer_name: None,
                 footer_note: Some(format!("STORNO of {}", request.original_fiscal_number)),
             };
-            let env_printer_model = env_opt("FISCAL_PRINTER_MODEL");
-            let env_serial_port = env_opt("FISCAL_SERIAL_PORT");
-            let env_protocol_variant = env_opt("FISCAL_PROTOCOL_VARIANT");
             let printer_model_default: Option<&'static str> =
                 match provider_name.as_str() {
                     "datecs_dp25" => Some("Datecs DP-25 (storno)"),
                     "simulator" => Some("Simulator (storno)"),
                     _ => None,
                 };
-            let printer_model: Option<&str> = env_printer_model
+            let pm_db = runtime_config::effective_printer_model(&cfg);
+            let printer_model: Option<&str> = pm_db
                 .as_deref()
                 .or(printer_model_default);
-            let baud = std::env::var("FISCAL_BAUD_RATE")
-                .ok()
-                .and_then(|s| s.parse().ok());
+            let serial_port = runtime_config::effective_serial_port(&cfg);
+            let protocol_variant = runtime_config::effective_protocol_variant(&cfg);
+            let baud_value = runtime_config::effective_baud(&cfg) as i64;
             let ctx = AttemptContext {
                 device_id: dev_id,
                 provider: &provider_name,
                 printer_model,
-                serial_port: env_serial_port.as_deref(),
-                baud,
-                protocol_variant: env_protocol_variant.as_deref(),
+                serial_port: serial_port.as_deref(),
+                baud: Some(baud_value),
+                protocol_variant: protocol_variant.as_deref(),
                 fiscal_device_id: paired,
-                raw_logging: raw_logging_enabled(),
+                raw_logging: runtime_config::effective_raw_logs(&cfg),
             };
             let row = persist::attempt_row_from_response(&synthesized, &res, &ctx);
             if let Err(e) = persist::record_fiscal_attempt(&path, &row) {
@@ -255,7 +260,10 @@ pub fn fiscal_request_z_confirm() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn fiscal_print_z_report(confirm_token: String) -> Result<ReceiptResponse, String> {
+pub fn fiscal_print_z_report(
+    app: tauri::AppHandle,
+    confirm_token: String,
+) -> Result<ReceiptResponse, String> {
     // Validate + consume the nonce inside the mutex — single-use.
     let valid = if let Ok(mut slot) = z_confirm_slot().lock() {
         match slot.as_ref() {
@@ -275,7 +283,9 @@ pub fn fiscal_print_z_report(confirm_token: String) -> Result<ReceiptResponse, S
     if !valid {
         return Err("Z-report rejected: confirm_token missing, expired, or already used".into());
     }
-    let p = providers::build(&provider_name()).map_err(|e| e.to_string())?;
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.print_z_report(&confirm_token).map_err(|e| e.to_string())
 }
 
@@ -307,13 +317,16 @@ pub fn fiscal_list_payment_attempts(
 }
 
 #[tauri::command]
-pub fn fiscal_probe(port: Option<String>, baud: Option<u32>) -> Result<ProbeReport, String> {
+pub fn fiscal_probe(
+    app: tauri::AppHandle,
+    port: Option<String>,
+    baud: Option<u32>,
+) -> Result<ProbeReport, String> {
+    let cfg = load_runtime_config(&app);
     let port = port
-        .or_else(|| std::env::var("FISCAL_SERIAL_PORT").ok())
-        .ok_or_else(|| "FISCAL_SERIAL_PORT missing".to_string())?;
-    let baud = baud
-        .or_else(|| std::env::var("FISCAL_BAUD_RATE").ok().and_then(|s| s.parse().ok()))
-        .unwrap_or(9600);
+        .or_else(|| runtime_config::effective_serial_port(&cfg))
+        .ok_or_else(|| "Port serial neconfigurat (Settings → Casă de marcat)".to_string())?;
+    let baud = baud.unwrap_or_else(|| runtime_config::effective_baud(&cfg));
     Ok(probe_all(&port, baud))
 }
 
@@ -340,11 +353,12 @@ pub async fn fiscal_bridge_claim(
     if let Some(dev_id) = device_id.as_deref() {
         match persist::db_path(&app) {
             Ok(path) => {
+                let cfg = load_runtime_config(&app);
                 let row = StationPairingRow {
                     device_id: dev_id.to_string(),
                     fiscal_device_id: Some(response.bridge_id.clone()),
                     payment_terminal_id: None,
-                    fiscal_provider: Some(provider_name()),
+                    fiscal_provider: Some(runtime_config::effective_provider(&cfg)),
                     payment_provider: None,
                 };
                 if let Err(e) = persist::upsert_station_pairing(&path, &row) {

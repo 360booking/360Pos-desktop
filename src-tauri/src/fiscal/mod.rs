@@ -16,4 +16,5 @@ pub mod mapping;
 pub mod persist;
 pub mod provider;
 pub mod providers;
+pub mod runtime_config;
 pub mod transport;

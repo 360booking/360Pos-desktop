@@ -16,6 +16,8 @@ const MIGRATION_V5_CARD_RECOVERY: &str =
     include_str!("../../src/sql/migrations/0005_card_recovery.sql");
 const MIGRATION_V6_FISCAL_ATTEMPTS: &str =
     include_str!("../../src/sql/migrations/0006_fiscal_attempts.sql");
+const MIGRATION_V7_FISCAL_RUNTIME_CONFIG: &str =
+    include_str!("../../src/sql/migrations/0007_fiscal_runtime_config.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -103,6 +105,12 @@ pub fn run() {
             sql: MIGRATION_V6_FISCAL_ATTEMPTS,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "fiscal_runtime_config (Settings UI source-of-truth)",
+            sql: MIGRATION_V7_FISCAL_RUNTIME_CONFIG,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -124,6 +132,8 @@ pub fn run() {
             fiscal_bridge_status,
             app_data_dir,
             fiscal::commands::fiscal_use_rust_enabled,
+            fiscal::commands::fiscal_get_runtime_config,
+            fiscal::commands::fiscal_set_runtime_config,
             fiscal::commands::fiscal_test_connection,
             fiscal::commands::fiscal_get_status,
             fiscal::commands::fiscal_print_receipt,
