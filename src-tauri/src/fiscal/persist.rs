@@ -85,6 +85,10 @@ pub fn db_path(app: &AppHandle) -> Result<PathBuf, FiscalError> {
 fn open(path: &Path) -> Result<Connection, FiscalError> {
     let conn = Connection::open(path)
         .map_err(|e| other(format!("sqlite open {}: {e}", path.display())))?;
+    // 5s busy timeout matches what `lib/db.ts::initDb` sets on the sqlx
+    // pool. Without it, any concurrent write from the sync engine would
+    // surface here as `database is locked` instead of waiting briefly.
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     // WAL is sticky once set by the plugin; this is a no-op if already enabled
     // but keeps the rusqlite path safe if it is the first writer.
     let _: String = conn

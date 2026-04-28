@@ -30,8 +30,21 @@ fn other(detail: impl Into<String>) -> FiscalError {
 /// it only runs from the Settings UI long after migrations have completed.
 fn open_existing(path: &Path) -> Result<Connection, FiscalError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    Connection::open_with_flags(path, flags)
-        .map_err(|e| other(format!("sqlite open (no-create) {}: {e}", path.display())))
+    let conn = Connection::open_with_flags(path, flags)
+        .map_err(|e| other(format!("sqlite open (no-create) {}: {e}", path.display())))?;
+    apply_pragmas(&conn);
+    Ok(conn)
+}
+
+/// Mirrors what `lib/db.ts::initDb` sets on the sqlx pool: a 5s busy
+/// timeout so concurrent writers (sqlx pool from sync engine vs. our
+/// rusqlite handle from Settings UI) wait for each other instead of
+/// raising SQLITE_BUSY immediately. WAL is sticky once enabled by sqlx
+/// so we only need to opt the rusqlite side into the same wait policy.
+fn apply_pragmas(conn: &Connection) {
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+    let _ = conn.execute_batch("PRAGMA journal_mode = WAL;");
+    let _ = conn.execute_batch("PRAGMA synchronous = NORMAL;");
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -51,7 +64,10 @@ pub struct RuntimeConfig {
 }
 
 fn open(path: &Path) -> Result<Connection, FiscalError> {
-    Connection::open(path).map_err(|e| other(format!("sqlite open {}: {e}", path.display())))
+    let conn = Connection::open(path)
+        .map_err(|e| other(format!("sqlite open {}: {e}", path.display())))?;
+    apply_pragmas(&conn);
+    Ok(conn)
 }
 
 pub fn read(path: &Path) -> Result<RuntimeConfig, FiscalError> {
