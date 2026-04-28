@@ -391,6 +391,50 @@ pub fn fiscal_list_ports() -> Vec<String> {
     list_ports()
 }
 
+/// Shows the operator + password the Rust side would actually use right now,
+/// plus the exact bytes it would put on the open_fiscal payload. No serial
+/// I/O — pure read of the runtime config + a build_open_fiscal call. Lets
+/// the operator confirm "what I typed in the UI = what the wire would see".
+#[derive(serde::Serialize)]
+pub struct FiscalDebugCreds {
+    pub provider_name: String,
+    pub operator: String,
+    pub operator_password: String,
+    pub operator_password_length: usize,
+    pub open_fiscal_payload_text: String,
+    pub open_fiscal_payload_hex: String,
+}
+
+#[tauri::command]
+pub fn fiscal_debug_credentials(app: tauri::AppHandle) -> Result<FiscalDebugCreds, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let operator = runtime_config::effective_operator(&cfg);
+    let password = runtime_config::effective_operator_password(&cfg);
+    let payload_text = format!("{}\t{}\t1", operator, password);
+    let payload_bytes = payload_text.as_bytes();
+    let payload_hex = payload_bytes
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+    log::info!(
+        "fiscal_debug_credentials: provider={} operator='{}' password='{}' (length={})",
+        provider_name,
+        operator,
+        password,
+        password.chars().count(),
+    );
+    Ok(FiscalDebugCreds {
+        provider_name,
+        operator,
+        operator_password: password.clone(),
+        operator_password_length: password.chars().count(),
+        open_fiscal_payload_text: payload_text.replace('\t', "\\t"),
+        open_fiscal_payload_hex: payload_hex,
+    })
+}
+
 /// Raw debug — open the port at the configured baud, send a STATUS (0x4A)
 /// frame in BOTH FP-55 and FP-700 dialects, log every byte received as hex.
 /// Lets us see what the register actually says when the high-level decode

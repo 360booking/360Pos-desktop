@@ -226,11 +226,21 @@ pub fn effective_operator(cfg: &RuntimeConfig) -> String {
 }
 
 pub fn effective_operator_password(cfg: &RuntimeConfig) -> String {
+    // Default depends on the device family per Datecs `PM_FMP350X_FMP55X_FP700X`
+    // manual: DP-25 / DP-25X / DP-150X / WP-25X / WP-50X / WP-500X / DP-05C
+    // ship with operator password = "0001" (4-digit, padded). FMP-350X /
+    // FMP-55X / FP-700X ship with "0000". Operator confirms his DP-25 is
+    // "0001". Falls back to the FP-700-family default when provider is
+    // unknown so we don't break older installs.
+    let provider_default = match cfg.provider.as_deref() {
+        Some("datecs_dp25") => "0001",
+        _ => "0000",
+    };
     cfg.operator_password
         .clone()
         .filter(|s| !s.is_empty())
         .or_else(|| env_opt("FISCAL_OPERATOR_PASSWORD"))
-        .unwrap_or_else(|| "0000".into())
+        .unwrap_or_else(|| provider_default.into())
 }
 
 pub fn effective_printer_model(cfg: &RuntimeConfig) -> Option<String> {

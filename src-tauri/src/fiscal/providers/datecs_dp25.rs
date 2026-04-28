@@ -70,6 +70,20 @@ pub struct DatecsDp25Provider {
 
 impl DatecsDp25Provider {
     pub fn new(cfg: DatecsConfig) -> Self {
+        // DEBUG (pilot only) — log the exact credentials this provider was
+        // instantiated with so we can prove what reaches the wire vs what was
+        // typed in the UI. Operator password is logged in clear because the
+        // pilot operator is the same person reading the log; remove this log
+        // (or hash) once we ship to multiple tenants.
+        log::info!(
+            "Datecs DP-25 provider built: port={} baud={} variant={} operator='{}' password='{}' (length={})",
+            cfg.serial_port,
+            cfg.baud,
+            if cfg.variant_fp700 { "fp700" } else { "fp55" },
+            cfg.operator,
+            cfg.operator_password,
+            cfg.operator_password.chars().count(),
+        );
         let tcfg = if cfg.variant_fp700 {
             DatecsTransportConfig::fp700(&cfg.serial_port, cfg.baud)
         } else {
@@ -79,6 +93,17 @@ impl DatecsDp25Provider {
             cfg,
             transport: Mutex::new(DatecsFpTransport::new(tcfg)),
         }
+    }
+
+    /// DEBUG (pilot only) — return the exact bytes that would be sent as the
+    /// open_fiscal payload. Lets the operator confirm "the password I see in
+    /// the UI is the password the wire sees" without printing a real receipt.
+    pub fn debug_open_fiscal_payload(&self) -> Vec<u8> {
+        self.build_open_fiscal()
+    }
+
+    pub fn debug_credentials(&self) -> (String, String) {
+        (self.cfg.operator.clone(), self.cfg.operator_password.clone())
     }
 
     fn cp1250(text: &str) -> Vec<u8> {
@@ -104,7 +129,14 @@ impl DatecsDp25Provider {
         // <op>\t<pwd>\t<till>  — TAB-separated, ASCII. Comment in Python:
         // FP-55/DP-25 uses TAB; an earlier comma version produced NAK on real
         // hardware.
-        format!("{}\t{}\t1", self.cfg.operator, self.cfg.operator_password).into_bytes()
+        let payload = format!("{}\t{}\t1", self.cfg.operator, self.cfg.operator_password);
+        log::info!(
+            "Datecs DP-25 open_fiscal payload: '{}' (operator='{}' password='{}' till='1')",
+            payload.replace('\t', "\\t"),
+            self.cfg.operator,
+            self.cfg.operator_password,
+        );
+        payload.into_bytes()
     }
 
     fn build_register_item(item: &ReceiptItem) -> Vec<u8> {

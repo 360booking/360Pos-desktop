@@ -70,6 +70,15 @@ interface ProbeAttempt {
   error: string | null;
 }
 
+interface FiscalDebugCreds {
+  provider_name: string;
+  operator: string;
+  operator_password: string;
+  operator_password_length: number;
+  open_fiscal_payload_text: string;
+  open_fiscal_payload_hex: string;
+}
+
 interface RawDebugResult {
   dialect: string;
   baud: number;
@@ -118,13 +127,17 @@ function emptyHardware(): FiscalRuntimeConfig {
     baud: 9600,
     protocol_variant: 'fp55',
     operator: '1',
-    operator_password: '0000',
+    operator_password: '0001', // DP-25 default per pilot's verified register
     printer_model: null,
     use_rust: false,
     enable_raw_logs: false,
     vat_map_json: null,
     cmd_codes_json: null,
   };
+}
+
+function defaultPasswordFor(provider: string | null): string {
+  return provider === 'datecs_dp25' ? '0001' : '0000';
 }
 
 function loggable(c: FiscalRuntimeConfig) {
@@ -174,6 +187,7 @@ export function FiscalSetupWizard() {
   const [pairErr, setPairErr] = useState<string | null>(null);
   const [probe, setProbe] = useState<AsyncState<ProbeReport>>({ state: 'idle' });
   const [rawDebug, setRawDebug] = useState<AsyncState<RawDebugResult[]>>({ state: 'idle' });
+  const [debugCreds, setDebugCreds] = useState<AsyncState<FiscalDebugCreds>>({ state: 'idle' });
 
   const deviceId = getConfig().deviceId ?? '';
 
@@ -373,6 +387,18 @@ export function FiscalSetupWizard() {
     }
   }
 
+  async function runDebugCreds() {
+    setDebugCreds({ state: 'busy' });
+    try {
+      const r = await invoke<FiscalDebugCreds>('fiscal_debug_credentials');
+      setDebugCreds({ state: 'ok', value: r });
+      logger.info('fiscal-setup', 'debug credentials result', r);
+    } catch (err) {
+      setDebugCreds({ state: 'err', error: String(err) });
+      logger.error('fiscal-setup', 'debug credentials failed', { err: String(err) });
+    }
+  }
+
   async function runRawDebug() {
     setRawDebug({ state: 'busy' });
     try {
@@ -449,7 +475,16 @@ export function FiscalSetupWizard() {
           <Row label="Provider">
             <select
               value={hw.provider ?? 'simulator'}
-              onChange={(e) => setHw({ ...hw, provider: e.target.value })}
+              onChange={(e) => {
+                const next = e.target.value;
+                // Auto-adjust password placeholder when switching family,
+                // but only if the user hasn't typed a custom one yet.
+                const prevDefault = defaultPasswordFor(hw.provider);
+                const nextPwd = hw.operator_password === prevDefault || hw.operator_password === '' || hw.operator_password === null
+                  ? defaultPasswordFor(next)
+                  : hw.operator_password;
+                setHw({ ...hw, provider: next, operator_password: nextPwd });
+              }}
               disabled={!hwLoaded}
               className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 text-sm w-full"
             >
@@ -535,15 +570,21 @@ export function FiscalSetupWizard() {
           </Row>
 
           <Row label="Parolă operator">
-            <input
-              type="password"
-              value={hw.operator_password ?? ''}
-              onChange={(e) =>
-                setHw({ ...hw, operator_password: e.target.value === '' ? null : e.target.value })
-              }
-              placeholder="0000"
-              className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 text-sm w-full"
-            />
+            <div className="w-full space-y-1">
+              <input
+                type="text"
+                value={hw.operator_password ?? ''}
+                onChange={(e) =>
+                  setHw({ ...hw, operator_password: e.target.value === '' ? null : e.target.value })
+                }
+                placeholder={defaultPasswordFor(hw.provider)}
+                className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 text-sm w-full font-mono"
+              />
+              <div className="text-[11px] text-slate-500">
+                Pentru DP-25 / DP-25X / DP-150X / WP-25X / WP-50X / WP-500X / DP-05C, parola default e <code className="text-emerald-300">0001</code>.
+                Pentru FMP-350X / FMP-55X / FP-700X, e <code className="text-amber-300">0000</code>. Confirmă cu tehnicianul ce a setat la verificarea ANAF.
+              </div>
+            </div>
           </Row>
 
           <div className="border-t border-white/10 pt-3 space-y-2">
@@ -596,6 +637,42 @@ export function FiscalSetupWizard() {
               </button>
             </>
           )}
+          <details className="basis-full text-xs text-slate-400 pt-1">
+            <summary className="cursor-pointer">Ce s-a salvat efectiv (pentru verificare)</summary>
+            <pre className="mt-1 rounded bg-black/40 border border-white/10 p-2 text-[11px] font-mono text-slate-200 whitespace-pre-wrap">
+{JSON.stringify({ ...hw, operator_password: hw.operator_password ? `(${hw.operator_password.length} chars)` : null }, null, 2)}
+            </pre>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Parola e mascată — afișăm doar lungimea ca să verifici că nu s-a tăiat caracterul. Lungimea ar trebui să fie 4 pentru DP-25 (<code>0001</code>).
+            </div>
+          </details>
+
+          <div className="basis-full pt-2">
+            <button
+              type="button"
+              onClick={() => void runDebugCreds()}
+              disabled={debugCreds.state === 'busy'}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold bg-amber-500/15 text-amber-200 border border-amber-400/30 hover:bg-amber-500/25 disabled:opacity-50"
+            >
+              {debugCreds.state === 'busy' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+              Verifică ce parolă va trimite efectiv (debug)
+            </button>
+            {debugCreds.state === 'ok' && (
+              <div className="mt-2 rounded-lg border border-amber-400/30 bg-amber-950/30 p-3 text-xs text-slate-200 space-y-1">
+                <div>provider activ: <code className="text-amber-300">{debugCreds.value.provider_name}</code></div>
+                <div>operator: <code className="text-amber-300">{debugCreds.value.operator}</code></div>
+                <div>parolă în clar: <code className="text-emerald-300 font-mono">{debugCreds.value.operator_password}</code> ({debugCreds.value.operator_password_length} caractere)</div>
+                <div>open_fiscal payload: <code className="text-emerald-300 font-mono">{debugCreds.value.open_fiscal_payload_text}</code></div>
+                <div>open_fiscal payload hex: <code className="text-slate-300 font-mono text-[11px]">{debugCreds.value.open_fiscal_payload_hex}</code></div>
+                <div className="text-[10px] text-amber-300/70 pt-1">
+                  Aceeași informație apare în log Rust — caută <code>fiscal_debug_credentials</code> sau <code>open_fiscal payload</code> în <code>%LOCALAPPDATA%\com.x360booking.pos\logs\</code>.
+                </div>
+              </div>
+            )}
+            {debugCreds.state === 'err' && (
+              <pre className="text-xs text-rose-300 font-mono whitespace-pre-wrap mt-2">{debugCreds.error}</pre>
+            )}
+          </div>
           {hwSave.state === 'err' && (
             <span className="text-xs text-rose-300 inline-flex items-center gap-1">
               <AlertTriangle className="h-3.5 w-3.5" /> {hwSave.error}
