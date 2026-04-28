@@ -25,13 +25,18 @@
 -- simulator / Datecs DP-25 / future Tremol / Eltrade. Only `provider`
 -- + `printer_model` change.
 --
--- 2026-04-28: REWRITTEN to drop all inline column comments. The previous
--- shape used `-- ...` comments with parens/commas after every column,
--- which the tauri-plugin-sql migration runner (sqlx) split incorrectly,
--- producing partial CREATE TABLE statements on Windows where the column
--- `fiscal_device_id` ended up missing. CREATE INDEX on that column then
--- failed with "no such column". Schema is unchanged from before.
+-- 2026-04-28: REAL root cause: migration 0001 already created an
+-- (unrelated) `fiscal_attempts` table with a totally different schema
+-- (order_id / adapter_id / request_payload_json / started_at). Our
+-- `CREATE TABLE IF NOT EXISTS` here was a no-op against that ghost
+-- table, and the subsequent CREATE INDEX on `fiscal_device_id` failed
+-- with "no such column". DROP it first — the Sprint 0 schema is unused
+-- by every Sprint 11 code path (Rust providers + persist + UI all read
+-- the new shape) so the drop is safe. Inline column comments were also
+-- stripped earlier today, kept that way.
 -- =============================================================
+
+DROP TABLE IF EXISTS fiscal_attempts;
 
 CREATE TABLE IF NOT EXISTS fiscal_attempts (
   id                  TEXT PRIMARY KEY,
