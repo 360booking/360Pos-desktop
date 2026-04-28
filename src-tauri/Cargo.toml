@@ -14,7 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools` enables Ctrl+Shift+I / F12 in release builds. Kept on while the
+# Sprint 3 fiscal hardware UI is being smoke-tested on Windows; remove when
+# the pilot is stable.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
