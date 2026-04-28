@@ -137,4 +137,34 @@ describe('SQLite migrations', () => {
     expect(names).toContain('payment_attempts');
     expect(names).toContain('station_pairings');
   });
+
+  it('fiscal_bridge_credentials carries the persisted claim bundle (0008)', () => {
+    const names = colNames(db, 'fiscal_bridge_credentials');
+    for (const expected of [
+      'id',
+      'server_base_url',
+      'websocket_url',
+      'device_token',
+      'bridge_id',
+      'tenant_id',
+      'printer_model',
+      'device_id',
+      'claimed_at',
+      'updated_at',
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it('fiscal_bridge_credentials enforces single-row constraint (id = 1)', () => {
+    db.exec(
+      `INSERT INTO fiscal_bridge_credentials (id, server_base_url, websocket_url, device_token, bridge_id, tenant_id) VALUES (1, 'https://x', 'wss://x', 'tok', 'bridge', 'tenant')`,
+    );
+    expect(() =>
+      db.exec(
+        `INSERT INTO fiscal_bridge_credentials (id, server_base_url, websocket_url, device_token, bridge_id, tenant_id) VALUES (2, 'https://y', 'wss://y', 'tok2', 'bridge2', 'tenant2')`,
+      ),
+    ).toThrow();
+    db.exec('DELETE FROM fiscal_bridge_credentials');
+  });
 });

@@ -97,6 +97,18 @@ interface ProbeReport {
   all_nak_hint: boolean;
 }
 
+interface SavedBridgeCredentials {
+  server_base_url: string;
+  websocket_url: string;
+  device_token: string;
+  bridge_id: string;
+  tenant_id: string;
+  printer_model: string | null;
+  device_id: string | null;
+  claimed_at: string | null;
+  updated_at: string | null;
+}
+
 interface BridgeState {
   configured: boolean;
   connected: boolean;
@@ -166,9 +178,11 @@ export function FiscalSetupWizard() {
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [code, setCode] = useState('');
   const [claim, setClaim] = useState<ClaimResponse | null>(null);
+  const [savedCreds, setSavedCreds] = useState<SavedBridgeCredentials | null>(null);
   const [bridgeState, setBridgeState] = useState<BridgeState | null>(null);
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimErr, setClaimErr] = useState<string | null>(null);
+  const [, setAutoStartTried] = useState(false);
   const [pairing, setPairing] = useState<StationPairing | null>(null);
 
   // ---------------- step 3: test ----------------
@@ -207,6 +221,33 @@ export function FiscalSetupWizard() {
       void refreshBridgeState();
       void getCachedFiscalConfig().then((c) => setPullCfg(c)).catch(() => {});
       if (deviceId) void refreshPairing();
+      // Try to auto-restart the WSS loop from persisted credentials so the
+      // operator never has to re-enroll just because they reinstalled.
+      try {
+        const saved = await invoke<SavedBridgeCredentials | null>('fiscal_get_saved_bridge_credentials');
+        if (saved) {
+          setSavedCreds(saved);
+          await invoke('fiscal_bridge_run', {
+            websocketUrl: saved.websocket_url,
+            deviceToken: saved.device_token,
+            printerModel: saved.printer_model ?? hw.provider ?? 'datecs_dp25',
+          });
+          logger.info('fiscal-setup', 'auto-restarted WSS from saved credentials', {
+            bridge_id: saved.bridge_id,
+            tenant_id: saved.tenant_id,
+            claimed_at: saved.claimed_at,
+          });
+          setClaim({
+            device_token: saved.device_token,
+            bridge_id: saved.bridge_id,
+            tenant_id: saved.tenant_id,
+            websocket_url: saved.websocket_url,
+          });
+        }
+      } catch (err) {
+        logger.warn('fiscal-setup', 'auto-restart failed', { err: String(err) });
+      }
+      setAutoStartTried(true);
     })();
     // Polling at 30s — kept gentle so the rest of the UI doesn't slow
     // down. Manual "Refresh status" button on step 2 covers tighter loops
@@ -271,6 +312,21 @@ export function FiscalSetupWizard() {
   }
 
   // ---------------- step 2 actions ----------------
+  async function handleClearSavedCreds() {
+    setClaimBusy(true);
+    setClaimErr(null);
+    try {
+      await invoke('fiscal_clear_saved_bridge_credentials');
+      setSavedCreds(null);
+      setClaim(null);
+      logger.info('fiscal-setup', 'saved credentials cleared — re-enrollment required');
+    } catch (err) {
+      setClaimErr(String(err));
+    } finally {
+      setClaimBusy(false);
+    }
+  }
+
   async function handleClaim() {
     setClaimBusy(true);
     setClaimErr(null);
@@ -691,6 +747,30 @@ export function FiscalSetupWizard() {
         sectionRef={step2Ref}
       >
         <div className="rounded-xl border border-white/10 bg-slate-900/40 p-4 space-y-3 text-sm">
+          {savedCreds && (
+            <div className="rounded-lg border border-emerald-400/30 bg-emerald-950/20 p-3 text-xs text-slate-200 space-y-1">
+              <div className="font-semibold text-emerald-300 inline-flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5" /> Stație înrolată — WSS pornit automat la lansare.
+              </div>
+              <div>bridge: <code className="text-emerald-200 font-mono">{savedCreds.bridge_id}</code></div>
+              <div>tenant: <code className="text-emerald-200 font-mono">{savedCreds.tenant_id}</code></div>
+              <div>înrolat la: <code className="text-emerald-200 font-mono">{savedCreds.claimed_at ?? '—'}</code></div>
+              <div className="text-[11px] text-slate-400 pt-1">
+                Nu mai e nevoie de cod nou la fiecare lansare. Folosește „Înrolează din nou" doar dacă schimbi tenant sau dacă tehnicianul ANAF resetează stația.
+              </div>
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => void handleClearSavedCreds()}
+                  disabled={claimBusy}
+                  className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-slate-700/40 text-slate-200 border border-white/10 hover:bg-slate-700/60 disabled:opacity-50"
+                >
+                  Șterge înrolarea + re-claim
+                </button>
+              </div>
+            </div>
+          )}
+
           <Row label="Cod înrolare">
             <input
               type="text"

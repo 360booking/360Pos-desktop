@@ -256,10 +256,16 @@ impl DatecsFpTransport {
         let raw = self.read_frame()?;
         log::debug!("datecs_fp ← raw={}", hex::encode_short(&raw));
 
-        // raw layout: LEN(4) + SEQ(1) + CMD(4 or 1) + DATA + POST + STATUS(6) + BCC(4)
-        // Minimum size = 4 + 1 + cmd_width + 1 + 6 + 4
+        // raw layout (DP-25X confirmed against DUDE 2026-04-28):
+        //   LEN(4) + SEQ(1) + CMD(4 or 1) + DATA(...) + POST(1) + BCC(4)
+        //
+        // The legacy FP-55 spec called for a separate 6-byte STATUS field
+        // between POST and BCC — that does NOT appear in the DP-25X reply.
+        // Status info is embedded inside DATA, separated by 0x09 (TAB) and
+        // 0x04 control bytes. We hand the whole DATA back to the provider
+        // and let it parse whatever it needs.
         let cmd_width = self.cfg.cmd_width as usize;
-        let min_len = 4 + 1 + cmd_width + 1 + 6 + 4;
+        let min_len = 4 + 1 + cmd_width + 1 + 4; // LEN + SEQ + CMD + POST + BCC
         if raw.len() < min_len {
             return Err(FiscalError::CommunicationError {
                 detail: format!("short frame: {} bytes", raw.len()),
@@ -279,13 +285,13 @@ impl DatecsFpTransport {
                 detail: "no POST marker in reply".into(),
             })?;
         let data_bytes = raw[5 + cmd_width..post_idx].to_vec();
-        if raw.len() < post_idx + 1 + 6 {
-            return Err(FiscalError::CommunicationError {
-                detail: "missing 6-byte STATUS in reply".into(),
-            });
-        }
+        // Optional legacy 6-byte STATUS field between POST and BCC. Present
+        // on FP-55 / FP-700 firmwares, absent on DP-25X. If there's room,
+        // grab it; otherwise leave as zeros and let higher layers cope.
         let mut status = [0u8; 6];
-        status.copy_from_slice(&raw[post_idx + 1..post_idx + 7]);
+        if raw.len() >= post_idx + 1 + 6 + 4 {
+            status.copy_from_slice(&raw[post_idx + 1..post_idx + 7]);
+        }
         Ok(FrameResponse {
             cmd: cmd_echo,
             data: data_bytes,

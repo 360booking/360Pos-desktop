@@ -18,6 +18,8 @@ const MIGRATION_V6_FISCAL_ATTEMPTS: &str =
     include_str!("../../src/sql/migrations/0006_fiscal_attempts.sql");
 const MIGRATION_V7_FISCAL_RUNTIME_CONFIG: &str =
     include_str!("../../src/sql/migrations/0007_fiscal_runtime_config.sql");
+const MIGRATION_V8_FISCAL_BRIDGE_CREDENTIALS: &str =
+    include_str!("../../src/sql/migrations/0008_fiscal_bridge_credentials.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -111,6 +113,12 @@ pub fn run() {
             sql: MIGRATION_V7_FISCAL_RUNTIME_CONFIG,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "fiscal_bridge_credentials (persist claim across restarts)",
+            sql: MIGRATION_V8_FISCAL_BRIDGE_CREDENTIALS,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -148,6 +156,8 @@ pub fn run() {
             fiscal::commands::fiscal_raw_debug,
             fiscal::commands::fiscal_debug_credentials,
             fiscal::commands::fiscal_bridge_claim,
+            fiscal::commands::fiscal_get_saved_bridge_credentials,
+            fiscal::commands::fiscal_clear_saved_bridge_credentials,
             fiscal::commands::fiscal_bridge_run,
             fiscal::commands::fiscal_bridge_state,
             fiscal::commands::fiscal_pull_config,

@@ -20,6 +20,7 @@ use crate::fiscal::bridge_client::{
     ws::{run_forever, WsClientConfig},
 };
 use crate::fiscal::config::{self, FiscalConfig};
+use crate::fiscal::credentials::{self, BridgeCredentials};
 use crate::fiscal::diagnostics::probe::{list_ports, probe_all, ProbeReport};
 use crate::fiscal::dto::{
     CancelReceiptRequest, FiscalStatus, ReceiptRequest, ReceiptResponse, TestResult,
@@ -622,6 +623,30 @@ pub async fn fiscal_bridge_claim(
     let response = claim(&server_base_url, &code, &printer_model)
         .await
         .map_err(|e| e.to_string())?;
+    // Persist the bundle so the next app launch can re-attach the WSS
+    // loop without forcing the operator to generate a fresh enrollment
+    // code. Best-effort — write failures are logged but not fatal.
+    if let Ok(path) = persist::db_path(&app) {
+        let creds = BridgeCredentials {
+            server_base_url: server_base_url.clone(),
+            websocket_url: response.websocket_url.clone(),
+            device_token: response.device_token.clone(),
+            bridge_id: response.bridge_id.clone(),
+            tenant_id: response.tenant_id.clone(),
+            printer_model: Some(printer_model.clone()),
+            device_id: device_id.clone(),
+            claimed_at: None,
+            updated_at: None,
+        };
+        if let Err(e) = credentials::write(&path, &creds) {
+            log::warn!("persist fiscal_bridge_credentials failed: {e}");
+        } else {
+            log::info!(
+                "fiscal_bridge_credentials persisted: bridge_id={} tenant_id={}",
+                response.bridge_id, response.tenant_id
+            );
+        }
+    }
     // B11 — auto-pair on a successful claim. Mirrors the audit Q2 1:1:1
     // rule: once the desktop owns this `bridge_id`, that's the fiscal device
     // for this station until the admin explicitly unpairs. Writes are
@@ -672,6 +697,22 @@ pub fn fiscal_clear_station_pairing(
 ) -> Result<(), String> {
     let path = persist::db_path(&app).map_err(|e| e.to_string())?;
     persist::clear_station_pairing(&path, &device_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_get_saved_bridge_credentials(
+    app: tauri::AppHandle,
+) -> Result<Option<BridgeCredentials>, String> {
+    let path = persist::db_path(&app).map_err(|e| e.to_string())?;
+    credentials::read(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_clear_saved_bridge_credentials(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let path = persist::db_path(&app).map_err(|e| e.to_string())?;
+    credentials::clear(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
