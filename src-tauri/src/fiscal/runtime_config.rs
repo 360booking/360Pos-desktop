@@ -111,6 +111,10 @@ pub fn write(path: &Path, cfg: &RuntimeConfig) -> Result<(), FiscalError> {
         ],
     )
     .map_err(|e| other(format!("UPSERT fiscal_runtime_config: {e}")))?;
+    log::debug!(
+        "runtime_config UPSERT: provider={:?} port={:?} baud={:?} variant={:?} use_rust={:?}",
+        cfg.provider, cfg.serial_port, cfg.baud, cfg.protocol_variant, cfg.use_rust,
+    );
     Ok(())
 }
 

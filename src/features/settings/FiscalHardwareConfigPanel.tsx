@@ -31,6 +31,22 @@ import {
 } from '@/adapters/fiscal/runtime-config';
 import { enableRustFiscalIfAllowed } from '@/adapters';
 import type { FiscalStatus } from '@/adapters/fiscal/types';
+import { logger } from '@/lib/logger';
+
+// Never log the operator password — every safe-to-log key only.
+function loggableConfig(c: FiscalRuntimeConfig) {
+  return {
+    provider: c.provider,
+    serial_port: c.serial_port,
+    baud: c.baud,
+    protocol_variant: c.protocol_variant,
+    operator: c.operator,
+    printer_model: c.printer_model,
+    use_rust: c.use_rust,
+    enable_raw_logs: c.enable_raw_logs,
+    has_password: Boolean(c.operator_password),
+  };
+}
 
 type AsyncState<T> =
   | { state: 'idle' }
@@ -84,9 +100,10 @@ export function FiscalHardwareConfigPanel() {
         // Backfill defaults for any NULL field so the form has sensible
         // initial values even on a fresh install.
         setCfg({ ...emptyConfig(), ...stripNulls(remote) });
+        logger.info('fiscal-config', 'loaded runtime config', loggableConfig(remote));
       } catch (err) {
         // Tauri command may not be wired yet (browser dev) — keep defaults.
-        console.warn('fiscal_get_runtime_config failed', err);
+        logger.warn('fiscal-config', 'fiscal_get_runtime_config failed', { err: String(err) });
       }
       setLoaded(true);
       void refreshPorts();
@@ -98,8 +115,9 @@ export function FiscalHardwareConfigPanel() {
     try {
       const list = await listSerialPorts();
       setPorts(list);
+      logger.debug('fiscal-config', 'serial ports listed', { count: list.length, ports: list });
     } catch (err) {
-      console.warn('fiscal_list_ports failed', err);
+      logger.warn('fiscal-config', 'fiscal_list_ports failed', { err: String(err) });
     } finally {
       setPortsBusy(false);
     }
@@ -107,35 +125,51 @@ export function FiscalHardwareConfigPanel() {
 
   async function handleSave() {
     setSave({ state: 'busy' });
+    logger.info('fiscal-config', 'save requested', loggableConfig(cfg));
     try {
       const written = await setFiscalRuntimeConfig(cfg);
       setCfg({ ...emptyConfig(), ...stripNulls(written) });
       setSave({ state: 'ok', value: written });
       // Adapter promotion is gated on the same flag — re-evaluate after save.
-      await enableRustFiscalIfAllowed();
+      const promoted = await enableRustFiscalIfAllowed();
+      logger.info('fiscal-config', 'save ok', {
+        ...loggableConfig(written),
+        rust_adapter_promoted: promoted,
+      });
     } catch (err) {
       setSave({ state: 'err', error: String(err) });
+      logger.error('fiscal-config', 'save failed', { err: String(err) });
     }
   }
 
   async function handleTestNow() {
     setTest({ state: 'busy' });
+    logger.info('fiscal-config', 'test now requested', loggableConfig(cfg));
     try {
       // Save first so the test exercises the same config the operator sees.
       await setFiscalRuntimeConfig(cfg);
       await enableRustFiscalIfAllowed();
       const conn = await invoke<{ ok: boolean; detail: string }>('fiscal_test_connection');
       let status: FiscalStatus | undefined;
+      let statusErr: string | undefined;
       try {
         status = await invoke<FiscalStatus>('fiscal_get_status');
-      } catch {
+      } catch (e) {
         // get_status can fail without test_connection necessarily failing
         // (e.g. simulator returns ok but status is a no-op). Surface the
         // connection result regardless.
+        statusErr = String(e);
       }
       setTest({ state: 'ok', value: { ok: conn.ok, detail: conn.detail, status } });
+      logger.info('fiscal-config', 'test now result', {
+        connection_ok: conn.ok,
+        connection_detail: conn.detail,
+        status,
+        status_error: statusErr,
+      });
     } catch (err) {
       setTest({ state: 'err', error: String(err) });
+      logger.error('fiscal-config', 'test now failed', { err: String(err) });
     }
   }
 

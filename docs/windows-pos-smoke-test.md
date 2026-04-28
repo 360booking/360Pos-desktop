@@ -402,6 +402,107 @@ Out of scope for this Windows pilot run — do **not** wire these even if the de
 - **ANAF e-Factura live submit.** Sprint 1 of e-Factura is per-tenant inbox only; live submit is later.
 - **Code-signed / notarised installer.** Sprint 11+. The MSI from section 11 will trigger Windows SmartScreen warnings — that is expected.
 
+## 12.7 Citire log-uri când Casa de marcat nu răspunde
+
+Adăugat 2026-04-28 împreună cu Sprint 3 hardware config UI. Toate operațiunile
+relevante (load, save, Test now, probe, test_connection, get_status,
+print_receipt, claim) log-ează **structurat** pe ambele părți — nu mai e
+nevoie de print-uri ad-hoc. Ordinea de verificare când Settings → Casă de
+marcat → Test now eșuează:
+
+### A. Log TS (in-app, ultimele ~1000 entries)
+
+Settings → tab **Diagnostic** → buton **Copy logs**. Output incluse:
+
+```
+[info] fiscal-config: load runtime config { provider, serial_port, baud, ... }
+[info] fiscal-config: save requested { ... }
+[info] fiscal-config: save ok { ..., rust_adapter_promoted: true|false }
+[error] fiscal-config: save failed { err }
+[info] fiscal-config: test now requested { ... }
+[info] fiscal-config: test now result { connection_ok, connection_detail, status, status_error }
+[error] fiscal-config: test now failed { err }
+[debug] fiscal-config: serial ports listed { count, ports: [COM1, COM3, ...] }
+[info] adapters: Rust fiscal adapter promoted (FISCAL_USE_RUST=true)
+[warn] adapters: enableRustFiscalIfAllowed failed { err }
+```
+
+Parola operatorului **niciodată** nu apare în log — doar `has_password: true|false`.
+
+### B. Log Rust (fișier pe disc, supraviețuiește restart)
+
+Path-ul: `%LOCALAPPDATA%\com.x360booking.pos\logs\` — de obicei un fișier
+`pos-desktop.log` (rotation `tauri_plugin_log` default). Ce căutat:
+
+```
+INFO  fiscal_set_runtime_config: provider="datecs_dp25" port="COM3" baud=9600 variant="fp55" operator="1" use_rust=Some(true) raw_logs=Some(false) has_password=true
+INFO  fiscal_test_connection: provider=datecs_dp25 port=Some("COM3") baud=9600
+INFO  fiscal_test_connection ok=true detail="Datecs FP-55 răspunde"
+ERROR fiscal_test_connection failed: PrinterBusy: ...
+INFO  fiscal_probe: port=COM3 baud=9600 (sweep dialect × baud)
+INFO  fiscal_probe done: tried=8 all_nak_hint=true recommended_dialect=None recommended_baud=None
+ERROR persist fiscal_attempt failed: ...
+```
+
+PowerShell rapid:
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\com.x360booking.pos\logs\" -File |
+  Sort LastWriteTime -Desc | Select -First 1 |
+  Get-Content -Tail 100
+```
+
+### C. SQLite local (dovada că s-a executat ce vede UI-ul)
+
+```powershell
+$db = "$env:APPDATA\360booking-pos\pos-desktop.db"
+
+# Configul curent — confirm că save-ul a ajuns în DB
+sqlite3 $db "SELECT provider, serial_port, baud, protocol_variant, operator, use_rust, enable_raw_logs, updated_at FROM fiscal_runtime_config WHERE id = 1;"
+
+# Ultimele 10 încercări fiscale (printed/failed/unknown + error_code)
+sqlite3 $db "SELECT created_at, provider, status, fiscal_number, error_code, substr(error_message, 1, 80) FROM fiscal_attempts ORDER BY created_at DESC LIMIT 10;"
+
+# Pairing stație
+sqlite3 $db "SELECT * FROM station_pairings;"
+```
+
+### D. Backend (când fiscalizarea pleacă din browser POS prin WSS)
+
+Pe serverul prod (sau local docker compose):
+
+```bash
+docker compose logs backend --since 10m | grep -E 'fiscal_bridge|fiscalize|jobs'
+docker compose logs backend --since 10m | grep <bridge_id>
+```
+
+`bridge_id` = îl vezi în Settings → Bridge backend → după claim, sau în
+`station_pairings.fiscal_device_id` din DB local.
+
+### E. Vechi `fiscal-bridge.exe` Python (DACĂ nu a fost dezinstalat)
+
+```powershell
+Get-Service "360booking-bridge" 2>$null | Format-List Status, StartType
+Get-Content "$env:PROGRAMDATA\360booking-bridge\logs\bridge.log" -Tail 100
+```
+
+Dacă serviciul Python e pornit **și** ai pus `use_rust=true` în UI, doi
+agenți concurează pentru WSS → backend dă close 4000. Stop-uiesc:
+
+```powershell
+nssm stop "360booking-bridge"
+nssm remove "360booking-bridge" confirm
+```
+
+### F. Ce raportezi când deschizi ticket
+
+1. Captură log TS (Diagnostic → Copy logs).
+2. Ultimele 100 linii din log Rust (paragraf B).
+3. Output-ul din SELECT `fiscal_runtime_config` + `fiscal_attempts` (paragraf C).
+4. Screenshot Settings → Casă de marcat (vezi că s-a salvat config-ul).
+5. Pentru NAK pe toate combo-urile la `fiscal_probe`: notezi „all_nak_hint=true"
+   — diagnostic = casa neautorizată ANAF, **nu cod**.
+
 ## 13. Failure capture template
 
 When something doesn't work, paste this template into the support ticket / Slack thread filled in:

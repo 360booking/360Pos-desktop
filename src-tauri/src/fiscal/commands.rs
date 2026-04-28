@@ -75,7 +75,12 @@ pub fn fiscal_use_rust_enabled(app: tauri::AppHandle) -> bool {
 #[tauri::command]
 pub fn fiscal_get_runtime_config(app: tauri::AppHandle) -> Result<RuntimeConfig, String> {
     let path = persist::db_path(&app).map_err(|e| e.to_string())?;
-    runtime_config::read(&path).map_err(|e| e.to_string())
+    let cfg = runtime_config::read(&path).map_err(|e| e.to_string())?;
+    log::debug!(
+        "fiscal_get_runtime_config: provider={:?} port={:?} use_rust={:?}",
+        cfg.provider, cfg.serial_port, cfg.use_rust
+    );
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -84,7 +89,16 @@ pub fn fiscal_set_runtime_config(
     config: RuntimeConfig,
 ) -> Result<RuntimeConfig, String> {
     let path = persist::db_path(&app).map_err(|e| e.to_string())?;
-    runtime_config::write(&path, &config).map_err(|e| e.to_string())?;
+    log::info!(
+        "fiscal_set_runtime_config: provider={:?} port={:?} baud={:?} variant={:?} operator={:?} use_rust={:?} raw_logs={:?} has_password={}",
+        config.provider, config.serial_port, config.baud, config.protocol_variant,
+        config.operator, config.use_rust, config.enable_raw_logs,
+        config.operator_password.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+    );
+    runtime_config::write(&path, &config).map_err(|e| {
+        log::error!("fiscal_set_runtime_config write failed: {e}");
+        e.to_string()
+    })?;
     runtime_config::read(&path).map_err(|e| e.to_string())
 }
 
@@ -92,16 +106,49 @@ pub fn fiscal_set_runtime_config(
 pub fn fiscal_test_connection(app: tauri::AppHandle) -> Result<TestResult, String> {
     let cfg = load_runtime_config(&app);
     let provider_name = runtime_config::effective_provider(&cfg);
-    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
-    p.test_connection().map_err(|e| e.to_string())
+    log::info!(
+        "fiscal_test_connection: provider={} port={:?} baud={}",
+        provider_name,
+        runtime_config::effective_serial_port(&cfg),
+        runtime_config::effective_baud(&cfg)
+    );
+    let p = providers::build(&provider_name, &cfg).map_err(|e| {
+        log::error!("fiscal_test_connection build failed: {e}");
+        e.to_string()
+    })?;
+    match p.test_connection() {
+        Ok(r) => {
+            log::info!("fiscal_test_connection ok={} detail={}", r.ok, r.detail);
+            Ok(r)
+        }
+        Err(e) => {
+            log::error!("fiscal_test_connection failed: {e}");
+            Err(e.to_string())
+        }
+    }
 }
 
 #[tauri::command]
 pub fn fiscal_get_status(app: tauri::AppHandle) -> Result<FiscalStatus, String> {
     let cfg = load_runtime_config(&app);
     let provider_name = runtime_config::effective_provider(&cfg);
-    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
-    p.get_status().map_err(|e| e.to_string())
+    let p = providers::build(&provider_name, &cfg).map_err(|e| {
+        log::error!("fiscal_get_status build failed: {e}");
+        e.to_string()
+    })?;
+    match p.get_status() {
+        Ok(s) => {
+            log::debug!(
+                "fiscal_get_status: online={} paper_ok={} ready={} busy={} err={:?}",
+                s.online, s.paper_ok, s.ready, s.busy, s.error_code
+            );
+            Ok(s)
+        }
+        Err(e) => {
+            log::warn!("fiscal_get_status failed: {e}");
+            Err(e.to_string())
+        }
+    }
 }
 
 /// Print a receipt + auto-persist a `fiscal_attempts` row.
@@ -327,7 +374,16 @@ pub fn fiscal_probe(
         .or_else(|| runtime_config::effective_serial_port(&cfg))
         .ok_or_else(|| "Port serial neconfigurat (Settings → Casă de marcat)".to_string())?;
     let baud = baud.unwrap_or_else(|| runtime_config::effective_baud(&cfg));
-    Ok(probe_all(&port, baud))
+    log::info!("fiscal_probe: port={port} baud={baud} (sweep dialect × baud)");
+    let report = probe_all(&port, baud);
+    log::info!(
+        "fiscal_probe done: tried={} all_nak_hint={} recommended_dialect={:?} recommended_baud={:?}",
+        report.attempts.len(),
+        report.all_nak_hint,
+        report.recommended_dialect,
+        report.recommended_baud,
+    );
+    Ok(report)
 }
 
 #[tauri::command]
