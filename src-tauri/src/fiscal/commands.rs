@@ -391,6 +391,167 @@ pub fn fiscal_list_ports() -> Vec<String> {
     list_ports()
 }
 
+/// Raw debug — open the port at the configured baud, send a STATUS (0x4A)
+/// frame in BOTH FP-55 and FP-700 dialects, log every byte received as hex.
+/// Lets us see what the register actually says when the high-level decode
+/// reports "device NAK" — sometimes the byte is not 0x15 at all.
+#[derive(serde::Serialize)]
+pub struct RawDebugResult {
+    pub dialect: String,
+    pub baud: u32,
+    pub frame_sent_hex: String,
+    pub bytes_received_hex: String,
+    pub byte_count: usize,
+    pub interpretation: String,
+}
+
+#[tauri::command]
+pub fn fiscal_raw_debug(app: tauri::AppHandle) -> Result<Vec<RawDebugResult>, String> {
+    use serialport::SerialPort;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    let cfg = load_runtime_config(&app);
+    let port_name = runtime_config::effective_serial_port(&cfg)
+        .ok_or_else(|| "Port serial neconfigurat".to_string())?;
+    let baud = runtime_config::effective_baud(&cfg);
+
+    let mut results: Vec<RawDebugResult> = Vec::new();
+
+    for dialect in &["fp55", "fp700"] {
+        let frame = build_status_frame(dialect);
+        let frame_hex = hex_dump(&frame);
+        let mut bytes = Vec::<u8>::new();
+        let interp;
+
+        let opened: Result<Box<dyn SerialPort>, _> = serialport::new(&port_name, baud)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .timeout(Duration::from_millis(200))
+            .open();
+        match opened {
+            Err(e) => {
+                interp = format!("open serial failed: {e}");
+            }
+            Ok(mut sp) => {
+                if let Err(e) = sp.write_all(&frame) {
+                    interp = format!("write failed: {e}");
+                } else {
+                    let deadline = Instant::now() + Duration::from_millis(2000);
+                    let mut buf = [0u8; 1];
+                    while Instant::now() < deadline {
+                        match sp.read(&mut buf) {
+                            Ok(0) => continue,
+                            Ok(_) => bytes.push(buf[0]),
+                            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                            Err(e) => {
+                                log::warn!("raw_debug read err: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    interp = interpret_response(&bytes);
+                }
+                drop(sp);
+            }
+        }
+        results.push(RawDebugResult {
+            dialect: (*dialect).into(),
+            baud,
+            frame_sent_hex: frame_hex,
+            bytes_received_hex: hex_dump(&bytes),
+            byte_count: bytes.len(),
+            interpretation: interp,
+        });
+    }
+
+    Ok(results)
+}
+
+fn build_status_frame(dialect: &str) -> Vec<u8> {
+    let offset: u8 = if dialect == "fp700" { 0x30 } else { 0x20 };
+    let xor: bool = dialect == "fp700";
+    let cmd_width_4: bool = dialect != "fp700";
+    let seq: u8 = 0x20;
+    let cmd: u16 = 0x4A;
+
+    let cmd_bytes: Vec<u8> = if cmd_width_4 {
+        vec![
+            offset + ((cmd >> 12) & 0xF) as u8,
+            offset + ((cmd >> 8) & 0xF) as u8,
+            offset + ((cmd >> 4) & 0xF) as u8,
+            offset + (cmd & 0xF) as u8,
+        ]
+    } else {
+        vec![cmd as u8]
+    };
+
+    let mut body: Vec<u8> = Vec::new();
+    body.push(seq);
+    body.extend_from_slice(&cmd_bytes);
+    body.push(0x05); // POST
+
+    let len_val: u16 = body.len() as u16;
+    let length_enc: [u8; 4] = [
+        offset + ((len_val >> 12) & 0xF) as u8,
+        offset + ((len_val >> 8) & 0xF) as u8,
+        offset + ((len_val >> 4) & 0xF) as u8,
+        offset + (len_val & 0xF) as u8,
+    ];
+
+    let bcc_value: u32 = if xor {
+        body.iter().fold(0u32, |acc, b| acc ^ (*b as u32))
+    } else {
+        body.iter().map(|b| *b as u32).sum::<u32>() & 0xFFFF
+    };
+    let bcc_enc: [u8; 4] = [
+        offset + ((bcc_value >> 12) & 0xF) as u8,
+        offset + ((bcc_value >> 8) & 0xF) as u8,
+        offset + ((bcc_value >> 4) & 0xF) as u8,
+        offset + (bcc_value & 0xF) as u8,
+    ];
+
+    let mut frame: Vec<u8> = Vec::new();
+    frame.push(0x01); // STX
+    frame.extend_from_slice(&length_enc);
+    frame.extend_from_slice(&body);
+    frame.extend_from_slice(&bcc_enc);
+    frame.push(0x03); // ETX
+    frame
+}
+
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        s.push_str(&format!("{:02X}", b));
+    }
+    s
+}
+
+fn interpret_response(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "no bytes received (timeout)".into();
+    }
+    let first = bytes[0];
+    let label = match first {
+        0x06 => "ACK",
+        0x15 => "NAK",
+        0x16 => "SYN (busy)",
+        0x01 => "STX (start of frame)",
+        0x03 => "ETX",
+        _ => "unknown",
+    };
+    format!(
+        "first byte: 0x{:02X} = {}; total {} bytes",
+        first, label, bytes.len()
+    )
+}
+
 #[tauri::command]
 pub async fn fiscal_bridge_claim(
     app: tauri::AppHandle,

@@ -70,6 +70,15 @@ interface ProbeAttempt {
   error: string | null;
 }
 
+interface RawDebugResult {
+  dialect: string;
+  baud: number;
+  frame_sent_hex: string;
+  bytes_received_hex: string;
+  byte_count: number;
+  interpretation: string;
+}
+
 interface ProbeReport {
   port: string;
   configured_baud: number;
@@ -164,6 +173,7 @@ export function FiscalSetupWizard() {
   const [pairBusy, setPairBusy] = useState(false);
   const [pairErr, setPairErr] = useState<string | null>(null);
   const [probe, setProbe] = useState<AsyncState<ProbeReport>>({ state: 'idle' });
+  const [rawDebug, setRawDebug] = useState<AsyncState<RawDebugResult[]>>({ state: 'idle' });
 
   const deviceId = getConfig().deviceId ?? '';
 
@@ -360,6 +370,18 @@ export function FiscalSetupWizard() {
       setPairErr(String(e));
     } finally {
       setPairBusy(false);
+    }
+  }
+
+  async function runRawDebug() {
+    setRawDebug({ state: 'busy' });
+    try {
+      const r = await invoke<RawDebugResult[]>('fiscal_raw_debug');
+      setRawDebug({ state: 'ok', value: r });
+      logger.info('fiscal-setup', 'raw_debug done', { results: r });
+    } catch (err) {
+      setRawDebug({ state: 'err', error: String(err) });
+      logger.error('fiscal-setup', 'raw_debug failed', { err: String(err) });
     }
   }
 
@@ -874,6 +896,55 @@ export function FiscalSetupWizard() {
             )}
             {probe.state === 'err' && (
               <pre className="text-xs text-rose-300 font-mono whitespace-pre-wrap">{probe.error}</pre>
+            )}
+          </section>
+
+          <section className="rounded-lg border border-rose-400/30 bg-rose-950/20 p-3 space-y-2 text-xs">
+            <h4 className="text-slate-200 font-semibold inline-flex items-center gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-rose-300" /> Raw bytes dump (cel mai jos nivel)
+            </h4>
+            <p className="text-slate-400">
+              Trimite frame STATUS (cmd 0x4A) ÎN AMBELE dialecte (FP-55 + FP-700) și loghează byte-cu-byte ce întoarce
+              casa. Folosit când probe-ul zice „toate NAK" — vrem să vedem dacă răspunsul e CHIAR 0x15 (NAK), sau alt
+              byte interpretat ca NAK (firmware nou, alt dialect proprietar). Trimite-mi output-ul aici.
+            </p>
+            <button
+              type="button"
+              onClick={() => void runRawDebug()}
+              disabled={rawDebug.state === 'busy' || !hw.serial_port}
+              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold bg-rose-500/15 text-rose-200 border border-rose-400/30 hover:bg-rose-500/25 disabled:opacity-50"
+            >
+              {rawDebug.state === 'busy' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              Rulează raw bytes dump
+            </button>
+            {rawDebug.state === 'ok' && (
+              <div className="space-y-2">
+                {rawDebug.value.map((r, i) => (
+                  <div key={i} className="rounded bg-black/40 border border-white/10 p-2 font-mono text-[11px] space-y-0.5">
+                    <div className="text-slate-300">
+                      <span className="text-violet-300">{r.dialect}</span> @ baud {r.baud}
+                    </div>
+                    <div><span className="text-slate-500">trimis:</span> <span className="text-emerald-200">{r.frame_sent_hex}</span></div>
+                    <div><span className="text-slate-500">primit ({r.byte_count}b):</span> <span className={r.byte_count > 0 ? 'text-amber-200' : 'text-rose-300'}>{r.bytes_received_hex || '(nimic)'}</span></div>
+                    <div className="text-slate-400">{r.interpretation}</div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = rawDebug.value.map((r) =>
+                      `=== ${r.dialect} @ ${r.baud} ===\nsent:    ${r.frame_sent_hex}\nrecv:    ${r.bytes_received_hex} (${r.byte_count} bytes)\ninterpret: ${r.interpretation}`
+                    ).join('\n\n');
+                    void navigator.clipboard.writeText(text);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold bg-slate-700/40 text-slate-200 border border-white/10 hover:bg-slate-700/60"
+                >
+                  Copy raw dump
+                </button>
+              </div>
+            )}
+            {rawDebug.state === 'err' && (
+              <pre className="text-xs text-rose-300 font-mono whitespace-pre-wrap">{rawDebug.error}</pre>
             )}
           </section>
 
