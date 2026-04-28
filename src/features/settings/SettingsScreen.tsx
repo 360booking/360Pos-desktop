@@ -49,9 +49,8 @@ import {
   type FlushOutcome,
 } from '@/lib/diagnostics/shipper';
 import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
-import { FiscalDiagnosticPanel } from './FiscalDiagnosticPanel';
-import { FiscalBridgePanel } from './FiscalBridgePanel';
-import { FiscalHardwareConfigPanel } from './FiscalHardwareConfigPanel';
+import { FiscalSetupWizard } from './FiscalSetupWizard';
+import { getRecentLogEntries, subscribeLogs, clearLogEntries } from '@/lib/logger';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
 
@@ -126,13 +125,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         <main className="flex-1 overflow-y-auto p-6">
           {tab === 'cont' && <ContSyncTab />}
-          {tab === 'fiscal' && (
-            <div className="space-y-8">
-              <FiscalHardwareConfigPanel />
-              <FiscalDiagnosticPanel />
-              <FiscalBridgePanel />
-            </div>
-          )}
+          {tab === 'fiscal' && <FiscalSetupWizard />}
           {tab === 'printer' && <ComingSoonTab title="Imprimante" hint="Imprimantă chitanțe + ticket bucătărie + autoprint la Trimite/plată. Vine în Val 2." />}
           {tab === 'btpos' && <ComingSoonTab title="BT POS terminal" hint="Configurare ECR + IP terminal. Așteaptă activarea ECR la BT pentru testare reală. Vine în Val 2." />}
           {tab === 'diagnostic' && <DiagnosticTab />}
@@ -458,6 +451,10 @@ function DiagnosticTab() {
         </div>
       </Section>
 
+      <Section title="Log live (ultimele 50)">
+        <LiveLogTail />
+      </Section>
+
       <Section title="Stare outbox + sync (live)">
         <Field label="Outbox queue depth" value={snap.queueDepth} />
         <Field label="DB queue depth (mutex)" value={snap.dbQueueDepth} />
@@ -477,6 +474,70 @@ function DiagnosticTab() {
       </Section>
 
       <ResetSection />
+    </div>
+  );
+}
+
+function LiveLogTail() {
+  const [, force] = useState(0);
+  const [filter, setFilter] = useState<'all' | 'fiscal' | 'sync' | 'errors'>('all');
+
+  useEffect(() => {
+    const unsub = subscribeLogs(() => force((n) => n + 1));
+    return unsub;
+  }, []);
+
+  const all = getRecentLogEntries(200);
+  const filtered = all.filter((e) => {
+    if (filter === 'all') return true;
+    if (filter === 'errors') return e.level === 'warn' || e.level === 'error';
+    if (filter === 'fiscal') return e.source.includes('fiscal') || e.source === 'adapters';
+    if (filter === 'sync') return e.source === 'sync' || e.source === 'app' || e.source === 'db';
+    return true;
+  }).slice(-50);
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-slate-900/40 p-3 text-xs">
+      <div className="flex items-center justify-between mb-2">
+        <div className="inline-flex gap-1">
+          {(['all', 'fiscal', 'sync', 'errors'] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              className={`px-2 py-0.5 rounded text-[11px] ${filter === f ? 'bg-violet-500/20 text-violet-200 border border-violet-400/30' : 'bg-slate-700/30 text-slate-300 border border-white/10'}`}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => { clearLogEntries(); }}
+          className="px-2 py-0.5 rounded text-[11px] bg-slate-700/30 text-slate-300 border border-white/10 hover:bg-slate-700/60"
+        >
+          clear
+        </button>
+      </div>
+      <div className="bg-black/40 border border-white/10 rounded p-2 max-h-72 overflow-auto font-mono text-[11px] leading-snug space-y-0.5">
+        {filtered.length === 0 && <div className="text-slate-500">— niciun log încă —</div>}
+        {filtered.map((e, i) => {
+          const cls = e.level === 'error' ? 'text-rose-300'
+            : e.level === 'warn' ? 'text-amber-300'
+            : e.level === 'info' ? 'text-emerald-200'
+            : 'text-slate-400';
+          const time = new Date(e.ts).toLocaleTimeString('ro-RO', { hour12: false });
+          const ctxStr = e.ctx ? ' ' + (typeof e.ctx === 'string' ? e.ctx : JSON.stringify(e.ctx)) : '';
+          return (
+            <div key={i} className={cls}>
+              <span className="text-slate-500">{time}</span> [{e.level}] {e.source}: {e.message}{ctxStr}
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[10px] text-slate-500 mt-1">
+        Ultimele 200 entries în RAM, filtrate la 50. Se actualizează live când apare ceva nou.
+      </p>
     </div>
   );
 }
