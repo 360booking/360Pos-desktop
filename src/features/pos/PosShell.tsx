@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
 import { StatusBar } from './StatusBar';
+import RestaurantAlertBanner from './RestaurantAlertBanner';
 import { KitchenQueueStrip } from './KitchenQueueStrip';
 import { ClaimOrderModal } from './ClaimOrderModal';
 import { PaymentModal } from './PaymentModal';
@@ -132,6 +133,7 @@ export function PosShell() {
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      <RestaurantAlertBanner />
       <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
         <TablesPane
