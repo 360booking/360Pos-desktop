@@ -13,6 +13,7 @@ import { useCatalogBootstrap } from './useCatalogBootstrap';
 import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
 import { useRemote } from '@/store/remote';
+import { pushToast } from '@/features/ui/Toast';
 import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
 import { runBootstrap } from '@/lib/sync/runBootstrap';
@@ -139,16 +140,43 @@ export function PosShell() {
           activeOrder={actions.order}
           totals={totals}
         />
-        <MenuPane onPickProduct={(p) => void actions.addProduct(p)} />
+        <MenuPane
+          onPickProduct={(p) => {
+            void actions.addProduct(p).catch((err: unknown) => {
+              const msg = (err as { message?: string })?.message ?? String(err);
+              pushToast({
+                level: 'error',
+                title: 'Nu am putut adăuga produsul',
+                message: msg,
+              });
+            });
+          }}
+        />
         <CartPane
           order={actions.order}
           totals={totals}
           onCash={() => setPaymentOpen(true)}
           onClear={() => actions.clear()}
-          onIncrement={(id) => void actions.incrementQuantity(id)}
-          onDecrement={(id) => void actions.decrementQuantity(id)}
-          onRemove={(id) => void actions.removeItem(id)}
-          onSendToKitchen={() => void actions.sendOrderToKitchen()}
+          onIncrement={(id) =>
+            void actions.incrementQuantity(id).catch((err: unknown) => {
+              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
+            })
+          }
+          onDecrement={(id) =>
+            void actions.decrementQuantity(id).catch((err: unknown) => {
+              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
+            })
+          }
+          onRemove={(id) =>
+            void actions.removeItem(id).catch((err: unknown) => {
+              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
+            })
+          }
+          onSendToKitchen={() =>
+            void actions.sendOrderToKitchen().catch((err: unknown) => {
+              pushToast({ level: 'error', title: 'Trimitere kitchen eșuată', message: (err as { message?: string })?.message ?? String(err) });
+            })
+          }
           onCancel={() => {
             if (!actions.order) return;
             if (!confirm('Anulezi comanda? Nu se va mai factura.')) return;
@@ -265,20 +293,33 @@ const STATUS_DOT: Record<TableSlotStatus, string> = {
   paid: 'bg-slate-400',
 };
 
-function statusForRemote(o: RemoteOrderRow): TableSlotStatus {
+function statusForRemote(
+  o: RemoteOrderRow,
+  itemsByOrder: Map<string, { sent: number; total: number }>,
+): TableSlotStatus {
   if (o.payment_status === 'paid') return 'paid';
   if (o.payment_status === 'partial') return 'partial';
   if (o.status === 'sent' || o.status === 'preparing' || o.status === 'ready' || o.status === 'served') {
+    // Some lines may have been added after the first send → 'unsent' badge
+    // is the right visual cue ("Trimite update").
+    const counts = itemsByOrder.get(o.id);
+    if (counts && counts.total > counts.sent) return 'unsent';
     return 'sent';
   }
-  // 'draft' or 'open' on a remote order: items present but not yet sent.
-  return o.status === 'draft' ? 'unsent' : 'open';
+  // Draft / open: an empty draft is not 'unsent' yet — only flag galben
+  // when there are at least some items that haven't been pushed to the
+  // kitchen. An empty draft shows as 'open' (violet) so the operator
+  // knows the table is taken but nothing's been cooked yet.
+  const counts = itemsByOrder.get(o.id);
+  if (counts && counts.total > 0 && counts.total > counts.sent) return 'unsent';
+  return 'open';
 }
 
 function TablesPane({ onPickTable, onPickNewOrder, activeOrder, totals }: TablesPaneProps) {
   const tables = useCatalog((s) => s.tables);
   const hydrated = useCatalog((s) => s.hydrated);
   const remoteOrders = useRemote((s) => s.orders);
+  const remoteItems = useRemote((s) => s.items);
 
   // Map tableId → the remote order on it (if any). Backend ships only
   // open orders so we don't need an is_open filter here.
@@ -289,6 +330,22 @@ function TablesPane({ onPickTable, onPickNewOrder, activeOrder, totals }: Tables
     }
     return m;
   }, [remoteOrders]);
+
+  // Sprint 12 — aggregate non-void items per remote order so the table
+  // dot can distinguish "empty draft" (open, violet) from "draft with
+  // items waiting to be sent" (unsent, amber). Without this every newly
+  // created remote draft showed up amber even when it had zero items.
+  const itemsByOrder = useMemo(() => {
+    const m = new Map<string, { sent: number; total: number }>();
+    for (const it of remoteItems) {
+      if (it.status === 'void') continue;
+      const cur = m.get(it.order_id) ?? { sent: 0, total: 0 };
+      cur.total += 1;
+      if (it.kitchen_ticket_id || it.sent_at) cur.sent += 1;
+      m.set(it.order_id, cur);
+    }
+    return m;
+  }, [remoteItems]);
 
   // Sprint 9 — count non-table open orders by source so the operator
   // can see at a glance how many walk-ins / deliveries are running.
@@ -346,7 +403,7 @@ function TablesPane({ onPickTable, onPickNewOrder, activeOrder, totals }: Tables
                   <TableButton
                     key={t.id}
                     t={t}
-                    status={statusForRemote(remote)}
+                    status={statusForRemote(remote, itemsByOrder)}
                     totalCents={remote.total_cents}
                     openedAtIso={remote.opened_at}
                     isForeign={!remote.current_device_can_edit}

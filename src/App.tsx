@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { LoginScreen } from './features/auth/LoginScreen';
 import { RestaurantPicker } from './features/auth/RestaurantPicker';
 import { PosShell } from './features/pos/PosShell';
+import { ToastContainer } from './features/ui/Toast';
 import { useDeviceStatusBootstrap } from './features/pos/useDeviceStatusBootstrap';
 import { initDb } from './lib/db';
 import { logger } from './lib/logger';
@@ -153,7 +154,12 @@ export default function App() {
       </div>
     );
   }
-  return <PosShell />;
+  return (
+    <>
+      <PosShell />
+      <ToastContainer />
+    </>
+  );
 }
 
 // Ensure the engine is stopped if a hot reload swaps the module.

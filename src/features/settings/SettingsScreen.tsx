@@ -50,7 +50,7 @@ import {
 } from '@/lib/diagnostics/shipper';
 import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
 import { FiscalSetupWizard } from './FiscalSetupWizard';
-import { getRecentLogEntries, subscribeLogs, clearLogEntries } from '@/lib/logger';
+import { getRecentLogEntries, subscribeLogs, clearLogEntries, isVerboseLogging, setVerboseLogging } from '@/lib/logger';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
 
@@ -452,6 +452,7 @@ function DiagnosticTab() {
       </Section>
 
       <Section title="Log live (ultimele 50)">
+        <VerboseToggle />
         <LiveLogTail />
       </Section>
 
@@ -474,6 +475,28 @@ function DiagnosticTab() {
       </Section>
 
       <ResetSection />
+    </div>
+  );
+}
+
+function VerboseToggle() {
+  const [on, setOn] = useState(() => isVerboseLogging());
+  return (
+    <div className="rounded-lg border border-white/10 bg-slate-900/40 p-3 mb-2 flex items-center justify-between">
+      <div>
+        <div className="text-xs font-semibold text-slate-200">Mod verbose (dev)</div>
+        <div className="text-[11px] text-slate-400">
+          Activează pentru a vedea log-urile <code>debug</code> pe categoriile pos.* (order, sync, fiscal, menu, tables). Oprit by default — info/warn/error sunt mereu logate.
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => { const next = !on; setVerboseLogging(next); setOn(next); }}
+        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${on ? 'bg-violet-500/80' : 'bg-slate-700'}`}
+        aria-pressed={on}
+      >
+        <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${on ? 'translate-x-6' : 'translate-x-1'}`} />
+      </button>
     </div>
   );
 }

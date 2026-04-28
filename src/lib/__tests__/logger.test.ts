@@ -30,8 +30,9 @@ describe('logger ring buffer', () => {
   });
 
   it('caps at 500 entries (oldest dropped first)', () => {
+    // Use info() — debug is dropped when verbose mode is off (default).
     for (let i = 0; i < 600; i += 1) {
-      logger.debug('test', `msg-${i}`);
+      logger.info('test', `msg-${i}`);
     }
     const e = getRecentLogEntries();
     expect(e).toHaveLength(500);
@@ -73,6 +74,17 @@ describe('logger ring buffer', () => {
     const spyInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
     logger.info('t', 'msg', { k: 1 });
     expect(spyInfo).toHaveBeenCalledWith('[info] t: msg', { k: 1 });
+  });
+
+  it('drops debug logs when verbose mode is off (default)', async () => {
+    const { setVerboseLogging } = await import('../logger');
+    setVerboseLogging(false);
+    logger.debug('t', 'should-not-appear');
+    expect(getRecentLogEntries()).toHaveLength(0);
+    setVerboseLogging(true);
+    logger.debug('t', 'now-it-appears');
+    expect(getRecentLogEntries()).toHaveLength(1);
+    setVerboseLogging(false); // restore
   });
 
   it('subscriber error does not stop other subscribers from being called', () => {

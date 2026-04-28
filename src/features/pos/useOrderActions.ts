@@ -33,6 +33,9 @@ import { getConfig } from '@/lib/config';
 import type { ProductRow } from '@/lib/db/catalogQueries';
 import { loadOrderFromRemote } from '@/lib/sync/resumeOrder';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
+import { restaurantOrdersApi, openTableViaRest, RestaurantOrderApiError } from '@/lib/api/restaurantOrders';
+import { restaurantOrderToOrder } from '@/lib/api/restaurantOrderMapper';
+import { logger } from '@/lib/logger';
 
 function vatConfigDefault(): TenantVatConfig {
   // Sprint 4 / 1 stores bootstrap.vatConfig in the SQLite settings row,
@@ -77,6 +80,30 @@ export function useOrderActions() {
   const newOrder = useCallback(
     async (tableId: string | null = null) => {
       const ctx = buildCtx();
+      // Online + table tap → mirror browser POS: server is the source of
+      // truth for "is there already a draft on this table". The 409
+      // conflict path inside openTableViaRest re-fetches the existing
+      // draft, so we never spawn a duplicate RestaurantOrder. Walk-in /
+      // tableless drafts go straight to create().
+      if (ctx.online) {
+        try {
+          const remote = tableId
+            ? await openTableViaRest(tableId)
+            : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
+          const next = restaurantOrderToOrder(remote, ctx.deviceId);
+          setOrder(next);
+          logger.info('pos.order', 'newOrder via REST', {
+            orderId: remote.id,
+            tableId,
+            existing: remote.items.length > 0,
+          });
+          return next;
+        } catch (err) {
+          logger.error('pos.order', 'newOrder REST failed, falling back to local', {
+            err: String(err),
+          });
+        }
+      }
       const r = await runAction(() =>
         createOrder({ tableId, vatConfig: vatConfigDefault() }, ctx),
       );
@@ -95,6 +122,20 @@ export function useOrderActions() {
    */
   const resumeOrder = useCallback(
     async (orderId: string) => {
+      const ctx = buildCtx();
+      // Prefer the server snapshot when online so the cart shows the
+      // canonical state (matches the browser POS behaviour).
+      if (ctx.online) {
+        try {
+          const remote = await restaurantOrdersApi.get(orderId);
+          const next = restaurantOrderToOrder(remote, ctx.deviceId);
+          setOrder(next);
+          logger.info('pos.order', 'resumed via REST', { orderId, items: remote.items.length });
+          return next;
+        } catch (err) {
+          logger.warn('pos.order', 'REST resume failed, falling back to local', { err: String(err) });
+        }
+      }
       const engine = getSyncEngine();
       if (!engine) return null;
       const loaded = await loadOrderFromRemote(engine.exec, orderId);
@@ -131,8 +172,53 @@ export function useOrderActions() {
   const addProduct = useCallback(
     async (p: ProductRow) => {
       const ctx = buildCtx();
-      const current = order ?? (await newOrder(null));
       const station = stationFor(p.category_id);
+
+      // Sprint 12 (REST direct) — when the desktop is online we hit the
+      // same /api/restaurant/orders endpoints the browser POS uses. The
+      // event-sourced pos-core path stays as the offline fallback below.
+      if (ctx.online) {
+        try {
+          let serverId = order?.serverId ?? null;
+          if (!serverId) {
+            // No server-side draft yet → create one. Mirrors the browser
+            // pattern (selectOrStartOnTable). The 409 conflict on a busy
+            // table is handled inside openTableViaRest by re-fetching.
+            const created = order?.tableId
+              ? await openTableViaRest(order.tableId)
+              : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
+            serverId = created.id;
+            logger.info('pos.order', 'created server draft for add-product', {
+              orderId: serverId,
+              tableId: order?.tableId ?? null,
+            });
+          }
+          const updated = await restaurantOrdersApi.addItem(serverId, {
+            menuItemId: p.id,
+            quantity: 1,
+          });
+          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+          logger.info('pos.order', 'item added via REST', {
+            orderId: serverId,
+            productId: p.id,
+            productName: p.name,
+            items: updated.items.length,
+          });
+          return;
+        } catch (err) {
+          const apiErr = err instanceof RestaurantOrderApiError ? err : null;
+          logger.error('pos.order', 'addItem REST failed', {
+            err: apiErr?.message ?? String(err),
+            status: apiErr?.status ?? null,
+            detail: apiErr?.detail ?? null,
+          });
+          // Re-throw so the UI panel can show a toast / alert.
+          throw err;
+        }
+      }
+
+      // Offline fallback: original event-sourced flow.
+      const current = order ?? (await newOrder(null));
       const r = await runAction(() =>
         addItem(
           current,
@@ -147,6 +233,10 @@ export function useOrderActions() {
         ),
       );
       setOrder(r.next);
+      logger.info('pos.order', 'item added via local event (offline)', {
+        productId: p.id,
+        productName: p.name,
+      });
     },
     [order, newOrder, setOrder, stationFor],
   );
@@ -170,6 +260,19 @@ export function useOrderActions() {
       const item = order.items.find((it) => it.id === itemId);
       if (!item || item.voidedAt) return;
       const ctx = buildCtx();
+      if (ctx.online && order.serverId) {
+        try {
+          const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
+            quantity: item.quantity + 1,
+          });
+          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+          logger.info('pos.order', 'qty++ via REST', { orderId: order.serverId, itemId });
+          return;
+        } catch (err) {
+          logger.error('pos.order', 'updateItem REST failed', { err: String(err) });
+          throw err;
+        }
+      }
       const r = await runAction(() =>
         setItemQuantity(order, { itemId, quantity: item.quantity + 1 }, ctx),
       );
@@ -184,7 +287,26 @@ export function useOrderActions() {
       const item = order.items.find((it) => it.id === itemId);
       if (!item || item.voidedAt) return;
       const ctx = buildCtx();
-      // qty=1 + decrement = void; otherwise just decrement.
+      if (ctx.online && order.serverId) {
+        try {
+          if (item.quantity <= 1) {
+            const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
+            setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+            logger.info('pos.order', 'item voided via REST (qty=0)', { orderId: order.serverId, itemId });
+          } else {
+            const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
+              quantity: item.quantity - 1,
+            });
+            setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+            logger.info('pos.order', 'qty-- via REST', { orderId: order.serverId, itemId });
+          }
+          return;
+        } catch (err) {
+          logger.error('pos.order', 'decrement REST failed', { err: String(err) });
+          throw err;
+        }
+      }
+      // Offline fallback.
       if (item.quantity <= 1) {
         const r = await runAction(() =>
           voidItem(order, { itemId, reason: 'qty zero' }, ctx),
@@ -206,6 +328,21 @@ export function useOrderActions() {
       const item = order.items.find((it) => it.id === itemId);
       if (!item || item.voidedAt) return;
       const ctx = buildCtx();
+      if (ctx.online && order.serverId) {
+        try {
+          const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
+          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+          logger.info('pos.order', 'item removed via REST', {
+            orderId: order.serverId,
+            itemId,
+            reason,
+          });
+          return;
+        } catch (err) {
+          logger.error('pos.order', 'removeItem REST failed', { err: String(err) });
+          throw err;
+        }
+      }
       const r = await runAction(() =>
         voidItem(order, { itemId, reason }, ctx),
       );
@@ -217,6 +354,20 @@ export function useOrderActions() {
   const sendOrderToKitchen = useCallback(async () => {
     if (!order) return;
     const ctx = buildCtx();
+    if (ctx.online && order.serverId) {
+      try {
+        const updated = await restaurantOrdersApi.sendToKitchen(order.serverId);
+        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+        logger.info('pos.order', 'sent to kitchen via REST', {
+          orderId: order.serverId,
+          tickets: updated.kitchenTickets.length,
+        });
+        return;
+      } catch (err) {
+        logger.error('pos.order', 'sendToKitchen REST failed', { err: String(err) });
+        throw err;
+      }
+    }
     const r = await runAction(() => sendToKitchen(order, {}, ctx));
     setOrder(r.next);
   }, [order, setOrder]);
@@ -231,11 +382,21 @@ export function useOrderActions() {
     async (reason: string = 'anulat din POS') => {
       if (!order) return;
       const ctx = buildCtx();
+      if (ctx.online && order.serverId) {
+        try {
+          await restaurantOrdersApi.cancel(order.serverId, reason);
+          logger.info('pos.order', 'cancelled via REST', { orderId: order.serverId, reason });
+          clear();
+          return;
+        } catch (err) {
+          logger.error('pos.order', 'cancel REST failed', { err: String(err) });
+          throw err;
+        }
+      }
       try {
         await runAction(() => cancelOrder(order, { reason }, ctx));
         clear();
       } catch (err) {
-        // surface to caller so the cart can show an alert
         throw err;
       }
     },

@@ -10,6 +10,39 @@
  */
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
+/**
+ * Verbose mode toggle — when off (default), pos.* debug logs are dropped
+ * from the ring buffer + console to keep production noise low. When on,
+ * everything goes through. Operator can flip this from Settings →
+ * Diagnostic. Persisted in localStorage so the setting survives reloads.
+ *
+ * info/warn/error are NEVER suppressed regardless of the toggle.
+ */
+const VERBOSE_KEY = 'pos.logger.verbose';
+
+function readVerbose(): boolean {
+  try {
+    return localStorage.getItem(VERBOSE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+let _verbose: boolean = readVerbose();
+
+export function setVerboseLogging(on: boolean): void {
+  _verbose = on;
+  try {
+    localStorage.setItem(VERBOSE_KEY, on ? 'true' : 'false');
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isVerboseLogging(): boolean {
+  return _verbose;
+}
+
 export interface LogEntry {
   ts: string;
   level: Level;
@@ -41,6 +74,10 @@ export function subscribeLogs(fn: () => void): () => void {
 }
 
 function emit(level: Level, source: string, message: string, ctx?: unknown): void {
+  // Drop debug-level pos.* logs unless verbose mode is on. Keeps the
+  // ring buffer + console clean in production while letting the operator
+  // flip a switch in Diagnostic when they need full traces.
+  if (level === 'debug' && !_verbose) return;
   // eslint-disable-next-line no-console
   console[level === 'debug' ? 'log' : level](
     `[${level}] ${source}: ${message}`,
