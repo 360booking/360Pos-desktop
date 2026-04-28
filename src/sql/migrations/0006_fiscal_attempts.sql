@@ -1,7 +1,7 @@
 -- =============================================================
 -- 360booking POS desktop — migration 0006 (Sprint 11 — fiscal port)
 --
--- Two append-only tables that record every fiscal + payment attempt
+-- Three append-only tables that record every fiscal + payment attempt
 -- locally, separately. Audit §5.5 (pos-desktop/docs/fiscal-port-audit.md)
 -- spells out the user-mandated rule:
 --
@@ -24,6 +24,13 @@
 -- Schema is intentionally protocol-agnostic — same shape works for
 -- simulator / Datecs DP-25 / future Tremol / Eltrade. Only `provider`
 -- + `printer_model` change.
+--
+-- 2026-04-28: REWRITTEN to drop all inline column comments. The previous
+-- shape used `-- ...` comments with parens/commas after every column,
+-- which the tauri-plugin-sql migration runner (sqlx) split incorrectly,
+-- producing partial CREATE TABLE statements on Windows where the column
+-- `fiscal_device_id` ended up missing. CREATE INDEX on that column then
+-- failed with "no such column". Schema is unchanged from before.
 -- =============================================================
 
 CREATE TABLE IF NOT EXISTS fiscal_attempts (
@@ -31,24 +38,25 @@ CREATE TABLE IF NOT EXISTS fiscal_attempts (
   mutation_id         TEXT NOT NULL UNIQUE,
   order_local_id      TEXT NOT NULL,
   device_id           TEXT NOT NULL,
-  fiscal_device_id    TEXT,                            -- pairing per audit Q2 (1:1, nullable until paired)
-  provider            TEXT NOT NULL,                   -- 'simulator' | 'datecs_dp25' | 'datecs_fp' | future
-  printer_model       TEXT,                            -- e.g. 'Datecs DP-25 (FP-55)'
-  serial_port         TEXT,                            -- COM3 / /dev/ttyUSB0 — null for simulator
+  fiscal_device_id    TEXT,
+  provider            TEXT NOT NULL,
+  printer_model       TEXT,
+  serial_port         TEXT,
   baud                INTEGER,
-  protocol_variant    TEXT,                            -- 'fp55' | 'fp700' | NULL
+  protocol_variant    TEXT,
   status              TEXT NOT NULL CHECK (status IN ('pending','printed','failed','unknown','confirmed_failed')),
-  fiscal_number       TEXT,                            -- BF number from close_fiscal reply
-  fiscal_date         TEXT,                            -- ISO-8601 UTC
-  raw_request         TEXT,                            -- gated on FISCAL_ENABLE_RAW_LOGS
-  raw_response        TEXT,                            -- gated on FISCAL_ENABLE_RAW_LOGS
-  parsed_response     TEXT,                            -- structured dump of provider response
-  error_code          TEXT,                            -- one of fiscal::error::FiscalError variants
+  fiscal_number       TEXT,
+  fiscal_date         TEXT,
+  raw_request         TEXT,
+  raw_response        TEXT,
+  parsed_response     TEXT,
+  error_code          TEXT,
   error_message       TEXT,
-  status_bytes        TEXT,                            -- 6-byte Datecs STATUS hex (debugging)
+  status_bytes        TEXT,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
 CREATE INDEX IF NOT EXISTS idx_fiscal_attempts_order      ON fiscal_attempts(order_local_id);
 CREATE INDEX IF NOT EXISTS idx_fiscal_attempts_status     ON fiscal_attempts(status);
 CREATE INDEX IF NOT EXISTS idx_fiscal_attempts_device     ON fiscal_attempts(device_id);
@@ -60,40 +68,38 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
   mutation_id           TEXT NOT NULL UNIQUE,
   order_local_id        TEXT NOT NULL,
   device_id             TEXT NOT NULL,
-  payment_terminal_id   TEXT,                          -- pairing per audit Q2 (1:1, nullable until paired)
-  provider              TEXT NOT NULL,                 -- 'stub' | 'bt-ecr' | 'smartpay' | future
+  payment_terminal_id   TEXT,
+  provider              TEXT NOT NULL,
   amount_cents          INTEGER NOT NULL,
   currency              TEXT NOT NULL DEFAULT 'RON',
   status                TEXT NOT NULL CHECK (status IN ('pending','approved','declined','cancelled','unknown')),
-  stan                  TEXT,                          -- system trace audit number
-  rrn                   TEXT,                          -- retrieval reference number
+  stan                  TEXT,
+  rrn                   TEXT,
   authorization_code    TEXT,
-  terminal_id           TEXT,                          -- terminal serial / TID
+  terminal_id           TEXT,
   merchant_id           TEXT,
-  card_scheme           TEXT,                          -- 'visa' | 'mastercard' | ...
+  card_scheme           TEXT,
   last4                 TEXT,
   response_code         TEXT,
   response_text         TEXT,
-  raw_request           TEXT,                          -- gated on FISCAL_ENABLE_RAW_LOGS
-  raw_response          TEXT,                          -- gated on FISCAL_ENABLE_RAW_LOGS
+  raw_request           TEXT,
+  raw_response          TEXT,
   created_at            TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_order    ON payment_attempts(order_local_id);
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_status   ON payment_attempts(status);
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_device   ON payment_attempts(device_id);
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_terminal ON payment_attempts(payment_terminal_id);
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_created  ON payment_attempts(created_at);
 
--- Per-station device pairing. Audit Q2: 1:1:1 strict in Sprint 1 (one
--- station = one fiscal device + one payment terminal). Schema lets the
--- foreign key live elsewhere later, but the UI/flow stays single-pair.
 CREATE TABLE IF NOT EXISTS station_pairings (
-  device_id              TEXT PRIMARY KEY,             -- pos-desktop device_id
-  fiscal_device_id       TEXT,                         -- bridge_id from fiscal_bridges (or local sim id)
-  payment_terminal_id    TEXT,                         -- terminal serial / TID
-  fiscal_provider        TEXT,                         -- mirrors fiscal_attempts.provider
-  payment_provider       TEXT,                         -- mirrors payment_attempts.provider
+  device_id              TEXT PRIMARY KEY,
+  fiscal_device_id       TEXT,
+  payment_terminal_id    TEXT,
+  fiscal_provider        TEXT,
+  payment_provider       TEXT,
   paired_at              TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
