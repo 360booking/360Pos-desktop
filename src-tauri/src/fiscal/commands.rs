@@ -189,7 +189,7 @@ pub fn fiscal_print_receipt(
                     .or(printer_model_default);
                 let serial_port = runtime_config::effective_serial_port(&cfg);
                 let protocol_variant = runtime_config::effective_protocol_variant(&cfg);
-                let baud_value = runtime_config::effective_baud(&cfg) as i64;
+                let baud_value = runtime_config::effective_baud(&cfg);
                 let ctx = AttemptContext {
                     device_id: dev_id,
                     provider: &provider_name,
@@ -262,7 +262,7 @@ pub fn fiscal_cancel_receipt(
                 .or(printer_model_default);
             let serial_port = runtime_config::effective_serial_port(&cfg);
             let protocol_variant = runtime_config::effective_protocol_variant(&cfg);
-            let baud_value = runtime_config::effective_baud(&cfg) as i64;
+            let baud_value = runtime_config::effective_baud(&cfg);
             let ctx = AttemptContext {
                 device_id: dev_id,
                 provider: &provider_name,
@@ -456,6 +456,7 @@ pub fn fiscal_clear_station_pairing(
 
 #[tauri::command]
 pub fn fiscal_bridge_run(
+    app: tauri::AppHandle,
     websocket_url: String,
     device_token: String,
     printer_model: String,
@@ -464,7 +465,13 @@ pub fn fiscal_bridge_run(
     if let Ok(mut s) = state.lock() {
         s.configured = true;
     }
-    let cfg = WsClientConfig { websocket_url, device_token, printer_model };
+    let db_path = persist::db_path(&app).ok();
+    let cfg = WsClientConfig {
+        websocket_url,
+        device_token,
+        printer_model,
+        db_path,
+    };
     let st = state.clone();
     // Spawn a tokio runtime on a dedicated thread so the WSS loop survives
     // outside Tauri's command futures (commands return immediately; the loop

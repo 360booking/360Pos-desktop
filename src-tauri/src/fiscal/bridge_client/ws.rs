@@ -26,11 +26,16 @@ use crate::fiscal::bridge_client::state::{now_unix, SharedState};
 use crate::fiscal::dto::{ReceiptRequest, ReceiptResponse};
 use crate::fiscal::error::FiscalError;
 use crate::fiscal::providers;
+use crate::fiscal::runtime_config::{self, RuntimeConfig};
 
 pub struct WsClientConfig {
     pub websocket_url: String,
     pub device_token: String,
     pub printer_model: String,
+    /// Path to the SQLite store so WSS-driven jobs read the same
+    /// `fiscal_runtime_config` row the UI writes. None falls back to
+    /// env-only resolution (parity with the pre-Sprint-3 behavior).
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 pub async fn run_forever(cfg: WsClientConfig, state: SharedState) -> Result<(), FiscalError> {
@@ -224,10 +229,14 @@ where
     Ok(())
 }
 
-fn run_job(kind: &str, payload: Value, _cfg: &WsClientConfig) -> Result<Value, FiscalError> {
-    let provider_name =
-        std::env::var("FISCAL_PROVIDER").unwrap_or_else(|_| "simulator".into());
-    let provider = providers::build(&provider_name)?;
+fn run_job(kind: &str, payload: Value, cfg: &WsClientConfig) -> Result<Value, FiscalError> {
+    let runtime_cfg: RuntimeConfig = cfg
+        .db_path
+        .as_deref()
+        .and_then(|p| runtime_config::read(p).ok())
+        .unwrap_or_default();
+    let provider_name = runtime_config::effective_provider(&runtime_cfg);
+    let provider = providers::build(&provider_name, &runtime_cfg)?;
     match kind {
         "test_print" => {
             let r = provider.test_connection()?;
