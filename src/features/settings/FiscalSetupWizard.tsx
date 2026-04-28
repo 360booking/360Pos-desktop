@@ -12,7 +12,7 @@
  * gating the next step. Pull-config + manual pairing + raw probe stay
  * available behind a single "Setări avansate" disclosure.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   CheckCircle2,
@@ -124,6 +124,7 @@ export function FiscalSetupWizard() {
   const [portsBusy, setPortsBusy] = useState(false);
 
   // ---------------- step 2: backend pairing ----------------
+  const step2Ref = useRef<HTMLElement | null>(null);
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [code, setCode] = useState('');
   const [claim, setClaim] = useState<ClaimResponse | null>(null);
@@ -526,7 +527,16 @@ export function FiscalSetupWizard() {
             Salvează configurarea hardware
           </button>
           {hwSavedAt && hwSave.state !== 'err' && (
-            <span className="text-xs text-emerald-300">Salvat {fmtTs(hwSavedAt)}</span>
+            <>
+              <span className="text-xs text-emerald-300">Salvat {fmtTs(hwSavedAt)}</span>
+              <button
+                type="button"
+                onClick={() => step2Ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30 hover:bg-violet-500/25"
+              >
+                Treci la Pasul 2 →
+              </button>
+            </>
           )}
           {hwSave.state === 'err' && (
             <span className="text-xs text-rose-300 inline-flex items-center gap-1">
@@ -542,7 +552,8 @@ export function FiscalSetupWizard() {
         title="Conexiune cu backend"
         subtitle="Cod de înrolare 10 min generat din admin → Restaurant → Casă de marcat → Activează."
         status={step2Done ? 'done' : claimErr ? 'err' : 'todo'}
-        disabled={!step1Done}
+        hint={!step1Done ? 'Recomandat: salvează hardware-ul la Pasul 1 mai întâi.' : undefined}
+        sectionRef={step2Ref}
       >
         <div className="rounded-xl border border-white/10 bg-slate-900/40 p-4 space-y-3 text-sm">
           <Row label="Cod înrolare">
@@ -551,8 +562,7 @@ export function FiscalSetupWizard() {
               value={code}
               onChange={(e) => setCode(e.target.value)}
               placeholder="F3KP-7XMA"
-              disabled={!step1Done}
-              className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 font-mono uppercase text-sm w-full disabled:opacity-50"
+              className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 font-mono uppercase text-sm w-full"
             />
           </Row>
           <Row label="Backend URL">
@@ -560,8 +570,7 @@ export function FiscalSetupWizard() {
               type="text"
               value={server}
               onChange={(e) => setServer(e.target.value)}
-              disabled={!step1Done}
-              className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 font-mono text-xs w-full disabled:opacity-50"
+              className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 font-mono text-xs w-full"
             />
           </Row>
 
@@ -569,7 +578,7 @@ export function FiscalSetupWizard() {
             <button
               type="button"
               onClick={() => void handleClaim()}
-              disabled={!step1Done || claimBusy || !code.trim()}
+              disabled={claimBusy || !code.trim()}
               className="inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-semibold bg-violet-500/15 text-violet-200 border border-violet-400/30 hover:bg-violet-500/25 disabled:opacity-50"
             >
               {claimBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plug className="h-4 w-4" />}
@@ -623,7 +632,7 @@ export function FiscalSetupWizard() {
         title="Test conexiune cu casa de marcat"
         subtitle="Verificare comunicare + status fizic + bon test (1 RON, TVA 19%)."
         status={step3Done ? 'done' : conn.state === 'err' ? 'err' : 'todo'}
-        disabled={!step1Done}
+        hint={!step1Done ? 'Recomandat: salvează hardware-ul la Pasul 1.' : !step2Done ? 'Pentru fiscalizare reală via WSS: completează Pasul 2.' : undefined}
       >
         <div className="grid gap-3 md:grid-cols-3">
           <TestCard
@@ -785,14 +794,16 @@ function Step({
   title,
   subtitle,
   status,
-  disabled,
+  hint,
+  sectionRef,
   children,
 }: {
   n: number;
   title: string;
   subtitle: string;
   status: 'todo' | 'done' | 'err';
-  disabled?: boolean;
+  hint?: string;
+  sectionRef?: React.RefObject<HTMLElement | null>;
   children: React.ReactNode;
 }) {
   const badge = status === 'done'
@@ -801,7 +812,7 @@ function Step({
       ? <span className="inline-flex items-center gap-1 text-rose-300 text-xs"><AlertTriangle className="h-3.5 w-3.5" /> eroare</span>
       : <span className="inline-flex items-center gap-1 text-slate-400 text-xs"><SettingsIcon className="h-3.5 w-3.5" /> de făcut</span>;
   return (
-    <section className={`rounded-2xl border ${status === 'done' ? 'border-emerald-400/30' : status === 'err' ? 'border-rose-400/30' : 'border-white/10'} bg-slate-900/20 p-5 ${disabled ? 'opacity-60' : ''}`}>
+    <section ref={sectionRef} className={`rounded-2xl border ${status === 'done' ? 'border-emerald-400/30' : status === 'err' ? 'border-rose-400/30' : 'border-white/10'} bg-slate-900/20 p-5`}>
       <header className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-start gap-3">
           <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${status === 'done' ? 'bg-emerald-500/20 text-emerald-200' : status === 'err' ? 'bg-rose-500/20 text-rose-200' : 'bg-slate-700/40 text-slate-200'}`}>
@@ -814,6 +825,11 @@ function Step({
         </div>
         {badge}
       </header>
+      {hint && (
+        <div className="mb-3 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          {hint}
+        </div>
+      )}
       {children}
     </section>
   );
