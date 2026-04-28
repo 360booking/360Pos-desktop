@@ -32,6 +32,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 url = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 # Bundles the (optional, vendor-restricted) production fiscal sidecar.
 # Public builds leave this disabled and ship simulators only.

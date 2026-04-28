@@ -51,6 +51,7 @@ import {
 import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
 import { FiscalDiagnosticPanel } from './FiscalDiagnosticPanel';
 import { FiscalBridgePanel } from './FiscalBridgePanel';
+import { FiscalHardwareConfigPanel } from './FiscalHardwareConfigPanel';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
 
@@ -127,6 +128,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
           {tab === 'cont' && <ContSyncTab />}
           {tab === 'fiscal' && (
             <div className="space-y-8">
+              <FiscalHardwareConfigPanel />
               <FiscalDiagnosticPanel />
               <FiscalBridgePanel />
             </div>

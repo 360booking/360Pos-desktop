@@ -28,6 +28,41 @@ Live tracker for the Python → Rust/Tauri fiscal-bridge port. Decisions live in
 | **B11** `station_pairings` persist + UI pairing | done | Rust `read_station_pairing/upsert_station_pairing/clear_station_pairing` + UPSERT cu COALESCE pe partial pair. Auto-pair la `fiscal_bridge_claim` (stamp bridge_id ca fiscal_device_id, provider). 3 commands Tauri + facadă TS `adapters/fiscal/pairing.ts` + secțiune UI „Pairing stație" în `FiscalBridgePanel`. |
 | Test pe casă reală | blocked | așteaptă acces fizic |
 
+## Sprint 3 — hardware config UI (in progress)
+
+Scopul: scoatem dependența de FISCAL_* env vars pentru cutover pe casă fizică.
+Operatorul configurează totul din Settings → Casă de marcat → „Configurare hardware".
+
+| Item | Status | Notes |
+|---|---|---|
+| Migrare `0007_fiscal_runtime_config.sql` | done | single-row table cu provider/port/baud/operator/use_rust + raw_logs |
+| Rust `fiscal/runtime_config.rs` | done | `read/write` rusqlite + `effective_*` helperi (DB > env > default); 6 unit tests |
+| Refactor `commands.rs` + `providers/mod.rs` | done | `provider_name()`/`use_rust_enabled()`/`raw_logging_enabled()` eliminate; commands cheamă `runtime_config::effective_*`; `providers::build` primește `&RuntimeConfig` în loc să citească env |
+| Tauri commands `fiscal_get_runtime_config` / `fiscal_set_runtime_config` | done | round-trip cu `RuntimeConfig` JSON; auto-promovează RustFiscalAdapter post-save |
+| TS facadă `adapters/fiscal/runtime-config.ts` | done | wrap minim peste invoke; 3 vitest |
+| UI `FiscalHardwareConfigPanel` | done | dropdown provider + port (refresh + manual override) + baud + variantă FP55/FP700 + operator + masked password + use_rust + raw_logs; buton „Salvează" + „Salvează + Test now" care înlănțuie `fiscal_test_connection` + `fiscal_get_status` |
+| Wired în `SettingsScreen` deasupra diagnosticului | done | tab `fiscal` afișează: hardware config → diagnostic → bridge claim |
+| Test pe casă reală | blocked | așteaptă acces fizic pe PC-ul lui Ovidiu |
+
+### Cum testez (după Sprint 3)
+
+1. CI workflow `pos-desktop-windows-tenant` produce MSI cu codul curent. Tester instalează.
+2. Login → Settings → tab „Casă de marcat" → secțiunea „Configurare hardware":
+   - Provider: „Datecs DP-25 (FP-55)"
+   - Port serial: „Refresh" → alege COM-ul fizic; sau scrie manual ex. „COM3"
+   - Baud: 9600 (default Datecs)
+   - Variantă protocol: „FP-55 (default DP-25)"
+   - Operator: „1", parolă: „0000" (sau ce e pe casă)
+   - Bifă „Activează adapterul Rust" — obligatoriu pentru hardware real
+   - Click „Salvează + Test now" → vezi `online: true` + status decoded.
+3. Dacă „Test now" pică cu NAK pe toate — vezi memoria
+   `feedback_fiscal_printer_nak_all_combos` (casa neautorizată ANAF). Nu mai
+   debug protocol până nu confirmă tehnicianul.
+4. Dacă „Test now" trece → secțiunea „Diagnostic" → buton „Print test receipt"
+   pentru bon real (1 RON, TVA 19%, cash). Verifică pe hârtie BF emis.
+5. Pentru WSS end-to-end (browser POS fiscalizează prin Tauri): secțiunea
+   „Bridge backend" — paste enrollment code din admin → „Claim + start WSS".
+
 ## Sprint 2 — extensii
 
 | Item | Status | Notes |
