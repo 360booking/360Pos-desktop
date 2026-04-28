@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::fiscal::error::FiscalError;
@@ -18,6 +18,20 @@ use crate::fiscal::providers::datecs_dp25::{CmdCodes, DatecsConfig};
 
 fn other(detail: impl Into<String>) -> FiscalError {
     FiscalError::Other { detail: detail.into() }
+}
+
+/// Open the SQLite store WITHOUT creating it. Critical: at app cold start
+/// `fiscal_use_rust_enabled` runs from a React effect that fires before
+/// `initDb()` (the tauri-plugin-sql connection that owns the migrations
+/// pipeline). If we used the default `Connection::open` here, rusqlite would
+/// create an empty DB file ahead of sqlx, which then fails to apply
+/// migrations on the pre-existing handle and the whole sync engine never
+/// starts. Read path must be NO_CREATE; write path opens normally because
+/// it only runs from the Settings UI long after migrations have completed.
+fn open_existing(path: &Path) -> Result<Connection, FiscalError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    Connection::open_with_flags(path, flags)
+        .map_err(|e| other(format!("sqlite open (no-create) {}: {e}", path.display())))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,7 +55,26 @@ fn open(path: &Path) -> Result<Connection, FiscalError> {
 }
 
 pub fn read(path: &Path) -> Result<RuntimeConfig, FiscalError> {
-    let conn = open(path)?;
+    // Cold-start safety: if the DB file does not exist yet (first launch,
+    // before tauri-plugin-sql has had a chance to connect and run
+    // migrations), return defaults instead of creating an empty file that
+    // would later confuse sqlx's migration runner.
+    if !path.exists() {
+        return Ok(RuntimeConfig::default());
+    }
+    let conn = open_existing(path)?;
+    // Equally important: the table itself may not exist yet if this read
+    // races migration 7. Tolerate that by returning defaults.
+    let table_present: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fiscal_runtime_config'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if table_present == 0 {
+        return Ok(RuntimeConfig::default());
+    }
     let row = conn
         .query_row(
             r#"SELECT provider, serial_port, baud, protocol_variant,
