@@ -462,7 +462,7 @@ pub fn fiscal_raw_debug(app: tauri::AppHandle) -> Result<Vec<RawDebugResult>, St
 
     let mut results: Vec<RawDebugResult> = Vec::new();
 
-    for dialect in &["fp55", "fp700"] {
+    for dialect in &["dp25x", "fp700"] {
         let frame = build_status_frame(dialect);
         let frame_hex = hex_dump(&frame);
         let mut bytes = Vec::<u8>::new();
@@ -515,9 +515,13 @@ pub fn fiscal_raw_debug(app: tauri::AppHandle) -> Result<Vec<RawDebugResult>, St
 }
 
 fn build_status_frame(dialect: &str) -> Vec<u8> {
-    let offset: u8 = if dialect == "fp700" { 0x30 } else { 0x20 };
+    // dp25x  → DUDE-confirmed: offset 0x30, BCC = SUM over LEN..POST,
+    //          CMD = 4 nibbles, LEN = body_len + 4 (LEN field included).
+    // fp700  → legacy fallback: offset 0x30, BCC = XOR over body, CMD raw byte.
+    let offset: u8 = 0x30;
     let xor: bool = dialect == "fp700";
     let cmd_width_4: bool = dialect != "fp700";
+    let bcc_includes_len: bool = dialect == "dp25x";
     let seq: u8 = 0x20;
     let cmd: u16 = 0x4A;
 
@@ -537,7 +541,8 @@ fn build_status_frame(dialect: &str) -> Vec<u8> {
     body.extend_from_slice(&cmd_bytes);
     body.push(0x05); // POST
 
-    let len_val: u16 = body.len() as u16;
+    // LEN value = body_len + 0x24 (DP-25X firmware quirk, see transport).
+    let len_val: u16 = (body.len() as u16) + 0x24;
     let length_enc: [u8; 4] = [
         offset + ((len_val >> 12) & 0xF) as u8,
         offset + ((len_val >> 8) & 0xF) as u8,
@@ -545,10 +550,20 @@ fn build_status_frame(dialect: &str) -> Vec<u8> {
         offset + (len_val & 0xF) as u8,
     ];
 
-    let bcc_value: u32 = if xor {
-        body.iter().fold(0u32, |acc, b| acc ^ (*b as u32))
+    // BCC coverage:
+    //   dp25x → LEN..POST (length field included in the sum)
+    //   fp700 → body only (legacy)
+    let bcc_target: Vec<u8> = if bcc_includes_len {
+        let mut v = length_enc.to_vec();
+        v.extend_from_slice(&body);
+        v
     } else {
-        body.iter().map(|b| *b as u32).sum::<u32>() & 0xFFFF
+        body.clone()
+    };
+    let bcc_value: u32 = if xor {
+        bcc_target.iter().fold(0u32, |acc, b| acc ^ (*b as u32))
+    } else {
+        bcc_target.iter().map(|b| *b as u32).sum::<u32>() & 0xFFFF
     };
     let bcc_enc: [u8; 4] = [
         offset + ((bcc_value >> 12) & 0xF) as u8,
