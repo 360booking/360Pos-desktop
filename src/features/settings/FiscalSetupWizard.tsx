@@ -803,7 +803,7 @@ function Step({
   subtitle: string;
   status: 'todo' | 'done' | 'err';
   hint?: string;
-  sectionRef?: React.RefObject<HTMLElement | null>;
+  sectionRef?: React.MutableRefObject<HTMLElement | null>;
   children: React.ReactNode;
 }) {
   const badge = status === 'done'
@@ -812,7 +812,12 @@ function Step({
       ? <span className="inline-flex items-center gap-1 text-rose-300 text-xs"><AlertTriangle className="h-3.5 w-3.5" /> eroare</span>
       : <span className="inline-flex items-center gap-1 text-slate-400 text-xs"><SettingsIcon className="h-3.5 w-3.5" /> de făcut</span>;
   return (
-    <section ref={sectionRef} className={`rounded-2xl border ${status === 'done' ? 'border-emerald-400/30' : status === 'err' ? 'border-rose-400/30' : 'border-white/10'} bg-slate-900/20 p-5`}>
+    <section
+      ref={(el) => {
+        if (sectionRef) sectionRef.current = el;
+      }}
+      className={`rounded-2xl border ${status === 'done' ? 'border-emerald-400/30' : status === 'err' ? 'border-rose-400/30' : 'border-white/10'} bg-slate-900/20 p-5`}
+    >
       <header className="flex items-start justify-between gap-3 mb-3">
         <div className="flex items-start gap-3">
           <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold ${status === 'done' ? 'bg-emerald-500/20 text-emerald-200' : status === 'err' ? 'bg-rose-500/20 text-rose-200' : 'bg-slate-700/40 text-slate-200'}`}>
