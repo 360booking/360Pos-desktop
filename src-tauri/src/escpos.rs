@@ -52,6 +52,12 @@ pub async fn escpos_send(host: String, port: u16, data: Vec<u8>) -> EscposResult
     };
 
     let mut stream = stream;
+    // Disable Nagle: ESC/POS payloads are small (a few hundred bytes) and
+    // the printer's interpreter latches one command at a time. Letting
+    // the kernel coalesce + delay 40ms makes simple test prints feel
+    // "super slow" even on a quiet LAN. With NODELAY each write_all flush
+    // hits the wire immediately.
+    let _ = stream.set_nodelay(true);
     let write_fut = async {
         stream.write_all(&data).await?;
         stream.flush().await?;
