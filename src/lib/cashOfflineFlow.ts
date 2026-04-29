@@ -75,6 +75,46 @@ function newKey(prefix: string): string {
 }
 
 /**
+ * Pending cash idempotency key store.
+ *
+ * Cash-pay can take 10-15s on a serial fiscal printer. If the operator
+ * gives up before the round-trip completes and clicks Cash a second
+ * time, generating a fresh idempotency key would let the backend
+ * register a SECOND payment + print a SECOND receipt. We pin the key
+ * to (orderId) in localStorage so retries reuse it and the server's
+ * Idempotency-Key dedup replays the original outcome.
+ *
+ * The key is cleared once the call returns success OR a non-retryable
+ * 4xx (the user cancels / fixes input). Network/timeout errors keep
+ * the key so the next click is a true retry.
+ */
+const PENDING_KEY_PREFIX = 'pos-desktop:pendingCashKey:';
+
+function readPendingCashKey(orderId: string): string | null {
+  try {
+    return localStorage.getItem(PENDING_KEY_PREFIX + orderId);
+  } catch {
+    return null;
+  }
+}
+
+function writePendingCashKey(orderId: string, key: string): void {
+  try {
+    localStorage.setItem(PENDING_KEY_PREFIX + orderId, key);
+  } catch {
+    /* private mode / quota — proceed without the safety net */
+  }
+}
+
+export function clearPendingCashKey(orderId: string): void {
+  try {
+    localStorage.removeItem(PENDING_KEY_PREFIX + orderId);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
  * Probe the fiscal device for live status. We treat any failure to talk
  * to the device as "not available" — the cash-offline path is allowed
  * only when we're confident the bon will print.
@@ -98,28 +138,52 @@ export async function runCashFlow(input: CashFlowInput): Promise<CashFlowOutcome
     throw new CashFlowError('AMOUNT_INVALID', 'Suma trebuie să fie pozitivă.');
   }
 
-  const idempotencyKey = newKey('cash');
+  // Reuse a pending key if the operator is retrying after a timeout —
+  // server-side Idempotency-Key dedup will replay the original outcome
+  // (and crucially won't re-print the bon).
+  const existingKey = readPendingCashKey(input.serverOrderId);
+  const idempotencyKey = existingKey ?? newKey('cash');
+  if (!existingKey) {
+    writePendingCashKey(input.serverOrderId, idempotencyKey);
+  }
 
   if (isReachable()) {
     // Online — post straight to the backend. Idempotency-Key protects
     // against retries; on 200 we're done. We do NOT touch the outbox
     // for online cash; the server is the source of truth.
-    const order = await restaurantOrdersApi.recordPayment(
-      input.serverOrderId,
-      {
-        method: 'cash',
-        amount: input.amountCents / 100,
-        customerCif: input.customerCif,
-      },
-      { idempotencyKey },
-    );
-    logger.info('pos.cash', 'online cash registered', {
-      orderId: input.serverOrderId,
-      amountCents: input.amountCents,
-      idempotencyKey,
-      fiscalReceiptNumber: order.fiscalReceiptNumber,
-    });
-    return { kind: 'online', order, idempotencyKey };
+    try {
+      const order = await restaurantOrdersApi.recordPayment(
+        input.serverOrderId,
+        {
+          method: 'cash',
+          amount: input.amountCents / 100,
+          customerCif: input.customerCif,
+        },
+        { idempotencyKey },
+      );
+      // Success — clear the pending key so a future legitimate cash-pay
+      // on the same order (e.g. a split bill scenario) gets a new one.
+      clearPendingCashKey(input.serverOrderId);
+      logger.info('pos.cash', 'online cash registered', {
+        orderId: input.serverOrderId,
+        amountCents: input.amountCents,
+        idempotencyKey,
+        reusedKey: !!existingKey,
+        fiscalReceiptNumber: order.fiscalReceiptNumber,
+      });
+      return { kind: 'online', order, idempotencyKey };
+    } catch (err) {
+      // Drop the pending key only on hard 4xx (validation / business
+      // reject) — those won't succeed if retried as-is, so a future
+      // attempt should be free to mint a new key. Keep the key on
+      // network / timeout / 5xx so retries reuse it.
+      const status = (err as { status?: number; statusCode?: number })?.status
+        ?? (err as { status?: number; statusCode?: number })?.statusCode;
+      if (status && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        clearPendingCashKey(input.serverOrderId);
+      }
+      throw err;
+    }
   }
 
   // ── Offline path ────────────────────────────────────────────────────
@@ -198,6 +262,10 @@ export async function runCashFlow(input: CashFlowInput): Promise<CashFlowOutcome
     fiscalReceiptId: null,
     fiscalAttemptId: null,
   });
+
+  // Outbox row landed — the bon is printed and persisted, future retry
+  // attempts on the same order should mint a new key.
+  clearPendingCashKey(input.serverOrderId);
 
   logger.info('pos.cash', 'offline cash collected + outbox row written', {
     orderId: input.serverOrderId,

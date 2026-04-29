@@ -106,23 +106,22 @@ export function ReportsTab() {
       )
     )
       return;
-    // Storno-by-BF on the desktop is best-effort: the backend endpoint we
-    // expose targets a known order_id (so it can rebuild items + payments
-    // from the order). When the operator only has the BF, we ask them to
-    // raise it through the web admin's order-history flow, which has the
-    // order context. Show a hint with the BF copied to clipboard so they
-    // can paste it into the search box.
-    try {
-      await navigator.clipboard?.writeText(bf.trim());
-    } catch {
-      /* clipboard blocked — fall through */
-    }
-    setOutcome({
-      ok: false,
-      text:
-        `Pentru storno de BF ${bf.trim()} mergi pe web admin → ` +
-        `Istoric comenzi → caută BF (l-am copiat în clipboard) → ` +
-        `deschide comanda → buton roșu „Storno bon fiscal".`,
+    return run('storno', `Storno BF ${bf.trim()}`, async () => {
+      const r = await getApiClient().post<{
+        ok: boolean;
+        message: string;
+        storno_fiscal_number?: string | null;
+      }>(
+        '/api/fiscal/storno-by-bf',
+        { bf: bf.trim(), reason: reason.trim() },
+        { timeout: 60_000 }, // serial fiscal storno can take 10-15s
+      );
+      const stornoNum = r.data.storno_fiscal_number;
+      const tail = stornoNum ? ` Bon storno: ${stornoNum}.` : '';
+      return {
+        ok: r.data.ok,
+        message: (r.data.message || (r.data.ok ? 'Emis.' : 'Eșec.')) + tail,
+      };
     });
   };
 

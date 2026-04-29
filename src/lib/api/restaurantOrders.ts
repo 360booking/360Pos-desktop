@@ -335,7 +335,14 @@ export const restaurantOrdersApi = {
       const res = await getApiClient().post<RestaurantOrder>(
         `/api/restaurant/orders/${orderId}/payments`,
         input,
-        { headers },
+        {
+          headers,
+          // Cash-pay drives the fiscal printer synchronously; the DP-25X
+          // serial round-trip can take 10-15s on the slowest paths.
+          // Default 5s timeout was producing fake failures that the
+          // operator retried, double-printing receipts.
+          timeout: 60_000,
+        },
       );
       return res.data;
     } catch (err) {
