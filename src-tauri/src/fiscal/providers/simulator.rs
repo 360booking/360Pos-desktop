@@ -90,4 +90,16 @@ impl FiscalPrinterProvider for SimulatorProvider {
             error_message: None,
         })
     }
+
+    fn print_x_report(&self) -> Result<ReceiptResponse, FiscalError> {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: Some(format!("SIM-X-{n:06}")),
+            fiscal_date: None,
+            raw_trace: "SIM x_report".into(),
+            error_code: None,
+            error_message: None,
+        })
+    }
 }

@@ -394,14 +394,14 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
     }
 
     fn print_z_report(&self, _confirm_token: &str) -> Result<ReceiptResponse, FiscalError> {
-        // Z-report uses the same cmd as X-report on FP-55; the subcommand is
-        // discriminated by the payload (`Z\t1` vs `X\t1`). Real Datecs returns
-        // a multi-line dump in the response data — we expose only success/
-        // failure to the caller.
+        // Z-report (end of day, zeros the daily counters). Datecs FP-55/DP-25
+        // shares cmd 0x45 between X and Z; the subcommand byte selects:
+        //   "0" → X (readout, no reset)
+        //   "1" → Z (closes the day, resets counters)
+        // Verified against fiscal-bridge/bridge/printers/datecs_dp25.py:226.
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let payload = b"Z\t1";
-        let reply = t.execute(self.cfg.cmd_codes.z_report, payload)?;
+        let reply = t.execute(self.cfg.cmd_codes.z_report, b"1")?;
         t.close();
         let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
         Ok(ReceiptResponse {
@@ -409,6 +409,24 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
             fiscal_number: None,
             fiscal_date: Some(now_iso()),
             raw_trace: format!("datecs_dp25 z_report cmd=0x{:02X} bytes={}", reply.cmd, dump),
+            error_code: None,
+            error_message: None,
+        })
+    }
+
+    fn print_x_report(&self) -> Result<ReceiptResponse, FiscalError> {
+        // X-report — readout only, daily counters untouched. Cmd 0x45 with
+        // payload "0" (vs "1" for Z). Same source as print_z_report above.
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let reply = t.execute(self.cfg.cmd_codes.x_report, b"0")?;
+        t.close();
+        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: None,
+            fiscal_date: Some(now_iso()),
+            raw_trace: format!("datecs_dp25 x_report cmd=0x{:02X} bytes={}", reply.cmd, dump),
             error_code: None,
             error_message: None,
         })

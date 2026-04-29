@@ -249,9 +249,29 @@ fn run_job(kind: &str, payload: Value, cfg: &WsClientConfig) -> Result<Value, Fi
             let r: ReceiptResponse = provider.print_receipt(req)?;
             Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
         }
-        "x_report" | "z_report" => Err(FiscalError::InvalidCommand {
-            detail: format!("{kind} not enabled in Sprint 1 (audit Q7)"),
-        }),
+        "cancel_receipt" => {
+            let req: crate::fiscal::dto::CancelReceiptRequest =
+                serde_json::from_value(payload).map_err(|e| {
+                    FiscalError::InvalidCommand { detail: format!("bad payload: {e}") }
+                })?;
+            let r: ReceiptResponse = provider.cancel_receipt(req)?;
+            Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
+        }
+        "x_report" => {
+            let r: ReceiptResponse = provider.print_x_report()?;
+            Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
+        }
+        "z_report" => {
+            // Backend may pass {confirm_token} or empty payload. Accept both:
+            // pilot rollout uses empty payload (server-side gate is the only
+            // gate); a future Sprint can move the gate into the agent itself.
+            let confirm_token = payload
+                .get("confirm_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("server-gated");
+            let r: ReceiptResponse = provider.print_z_report(confirm_token)?;
+            Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
+        }
         other => Err(FiscalError::InvalidCommand {
             detail: format!("unknown job kind: {other}"),
         }),

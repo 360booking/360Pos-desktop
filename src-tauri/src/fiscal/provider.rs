@@ -23,4 +23,12 @@ pub trait FiscalPrinterProvider: Send + Sync {
             detail: "z_report not supported by this provider".into(),
         })
     }
+    /// X-report — intermediate readout that does NOT zero the daily counters.
+    /// Safe to run any time, no confirm token. Default impl rejects so
+    /// providers opt in.
+    fn print_x_report(&self) -> Result<ReceiptResponse, FiscalError> {
+        Err(FiscalError::InvalidCommand {
+            detail: "x_report not supported by this provider".into(),
+        })
+    }
 }
