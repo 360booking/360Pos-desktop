@@ -21,6 +21,8 @@ const MIGRATION_V7_FISCAL_RUNTIME_CONFIG: &str =
     include_str!("../../src/sql/migrations/0007_fiscal_runtime_config.sql");
 const MIGRATION_V8_FISCAL_BRIDGE_CREDENTIALS: &str =
     include_str!("../../src/sql/migrations/0008_fiscal_bridge_credentials.sql");
+const MIGRATION_V9_LOCAL_PAYMENT_OUTBOX: &str =
+    include_str!("../../src/sql/migrations/0009_local_payment_outbox.sql");
 
 #[derive(Serialize)]
 struct FiscalBridgeStatus {
@@ -118,6 +120,12 @@ pub fn run() {
             version: 8,
             description: "fiscal_bridge_credentials (persist claim across restarts)",
             sql: MIGRATION_V8_FISCAL_BRIDGE_CREDENTIALS,
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 9,
+            description: "local_payment_outbox — Faza 2",
+            sql: MIGRATION_V9_LOCAL_PAYMENT_OUTBOX,
             kind: MigrationKind::Up,
         },
     ];

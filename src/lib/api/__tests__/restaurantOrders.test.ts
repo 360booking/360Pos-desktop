@@ -18,6 +18,8 @@ import {
   restaurantOrdersApi,
   openTableViaRest,
   RestaurantOrderApiError,
+  OrderClosedError,
+  classifyOrderMutationError,
 } from '../restaurantOrders';
 
 beforeEach(() => {
@@ -136,5 +138,39 @@ describe('openTableViaRest', () => {
       message: '500',
     });
     await expect(openTableViaRest('tbl-1')).rejects.toBeInstanceOf(RestaurantOrderApiError);
+  });
+});
+
+describe('classifyOrderMutationError', () => {
+  it('returns OrderClosedError(cancelled) for backend "Comandă anulată" 400', () => {
+    const err = new RestaurantOrderApiError(
+      'Comandă anulată — nu se pot adăuga produse.',
+      400,
+      'Comandă anulată — nu se pot adăuga produse.',
+    );
+    const closed = classifyOrderMutationError(err, 'ord-1');
+    expect(closed).toBeInstanceOf(OrderClosedError);
+    expect(closed?.reason).toBe('cancelled');
+    expect(closed?.orderId).toBe('ord-1');
+  });
+
+  it('returns OrderClosedError(not_found) for 404 "Comanda nu există"', () => {
+    const err = new RestaurantOrderApiError('Comanda nu există.', 404, 'Comanda nu există.');
+    const closed = classifyOrderMutationError(err, 'ord-1');
+    expect(closed?.reason).toBe('not_found');
+  });
+
+  it('returns null for unrelated 400 errors (e.g. quantity invalid)', () => {
+    const err = new RestaurantOrderApiError(
+      'Cantitatea trebuie să fie pozitivă.',
+      400,
+      'Cantitatea trebuie să fie pozitivă.',
+    );
+    expect(classifyOrderMutationError(err, 'ord-1')).toBeNull();
+  });
+
+  it('returns null for 5xx errors so caller treats them as transient', () => {
+    const err = new RestaurantOrderApiError('boom', 500, 'boom');
+    expect(classifyOrderMutationError(err, 'ord-1')).toBeNull();
   });
 });

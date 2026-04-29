@@ -1,29 +1,27 @@
 /**
- * Hook that exposes the cart-mutating actions used by the panes.
- * Sprint 4 / 3.
+ * Cart-mutating actions used by the POS panes.
  *
- * Each action runs the pure pos-core function, persists the produced
- * SyncEvents through the outbox, and pushes the new Order into the
- * `useCurrentOrder` zustand store. The UI never touches pos-core
- * directly — it goes through this hook.
+ * Faza 2 — online-first refactor. The seven order-shape mutations
+ * (newOrder, addProduct, increment/decrement/remove, sendToKitchen,
+ * cancel) require a reachable backend; if we're offline or the REST
+ * call drops, we throw `OfflineMutationError` and let the UI render a
+ * read-only state. We no longer fall through to the local pos-core
+ * event-sourced path for these actions — desktop and browser POS now
+ * have the same online contract.
  *
- * The current order has a single in-memory slot — if the operator clicks
- * a product without a draft existing yet, we transparently create one
- * (with a null tableId) so the friction stays at one click.
+ * What stays event-sourced for now: walk-in/delivery creation
+ * (`newOrderWithCustomer` — server still has draft-create gaps for
+ * non-table sources), card payment outcomes (terminal-driven flow),
+ * and the legacy `payCash` no-arg helper. Cash-with-amount goes through
+ * the Faza 2 cash-offline path implemented in PaymentModal.
  */
 import { useCallback, useMemo } from 'react';
 import {
-  addItem,
-  cancelOrder,
   createOrder,
   registerCardPaymentResult,
   registerCashPayment,
   ROMANIAN_DEFAULT_VAT_BP,
-  sendToKitchen,
-  setItemQuantity,
-  voidItem,
   type ActionCtx,
-  type CategoryType,
   type TenantVatConfig,
 } from '@/core/pos-core';
 import { runAction } from '@/lib/sync/dispatch';
@@ -31,17 +29,22 @@ import { useCurrentOrder } from '@/store/currentOrder';
 import { useCatalog } from '@/store/catalog';
 import { getConfig } from '@/lib/config';
 import type { ProductRow } from '@/lib/db/catalogQueries';
-import { loadOrderFromRemote } from '@/lib/sync/resumeOrder';
-import { getSyncEngine } from '@/lib/sync/bootstrap';
-import { restaurantOrdersApi, openTableViaRest, RestaurantOrderApiError } from '@/lib/api/restaurantOrders';
+import { isReachable } from '@/lib/reachability';
+import {
+  restaurantOrdersApi,
+  openTableViaRest,
+  RestaurantOrderApiError,
+  OrderClosedError,
+  OfflineMutationError,
+  classifyOrderMutationError,
+  type RestaurantOrder,
+} from '@/lib/api/restaurantOrders';
 import { restaurantOrderToOrder } from '@/lib/api/restaurantOrderMapper';
-import { printKitchenTicketLocal } from '@/lib/print/dispatch';
 import { logger } from '@/lib/logger';
+import { runCashFlow, CashFlowError } from '@/lib/cashOfflineFlow';
+import { useAuthStore } from '@/store/auth';
 
 function vatConfigDefault(): TenantVatConfig {
-  // Sprint 4 / 1 stores bootstrap.vatConfig in the SQLite settings row,
-  // but we don't yet expose it through the catalog store. RO 19% is a
-  // safe default; backend remains source of truth for fiscal totals.
   return { defaultRateBp: ROMANIAN_DEFAULT_VAT_BP };
 }
 
@@ -54,14 +57,39 @@ function buildCtx(): ActionCtx {
       newMutationId: () => crypto.randomUUID(),
     },
     deviceId: cfg.deviceId ?? 'unpaired',
-    online: cfg.syncTransportMode === 'http',
+    online: isReachable(),
   };
 }
 
-function categoryTypeForStation(station: string | null): CategoryType {
-  if (station === 'bar') return 'bar';
-  if (station === 'kitchen' || station === 'pizza') return 'restaurant';
-  return 'other';
+/**
+ * Translate a thrown REST error into the right cart-side outcome:
+ *   - axios "no response" / 5xx → OfflineMutationError (desktop is offline
+ *     or backend is briefly unhealthy);
+ *   - 400/404 mapping to a closed order → OrderClosedError;
+ *   - everything else (real 4xx, validation) → re-thrown verbatim.
+ *
+ * Caller must handle the returned error type at the boundary; we never
+ * fall through to a local SQLite mutation in Faza 2.
+ */
+function classifyMutationFailure(
+  err: unknown,
+  action: string,
+  orderId: string | null,
+): never {
+  if (err instanceof RestaurantOrderApiError) {
+    const closed = classifyOrderMutationError(err, orderId);
+    if (closed) throw closed;
+    // 5xx is "backend up but ill" — treat like offline so the UI shows
+    // the same banner and the operator knows mutations are paused.
+    if (err.status != null && err.status >= 500) {
+      throw new OfflineMutationError(action);
+    }
+    throw err;
+  }
+  // No-status error means axios couldn't reach the server (network drop,
+  // CORS, DNS, timeout). Reachability detector will already have flipped
+  // us offline; surface the same offline error here for UX consistency.
+  throw new OfflineMutationError(action);
 }
 
 export function useOrderActions() {
@@ -69,6 +97,22 @@ export function useOrderActions() {
   const setOrder = useCurrentOrder((s) => s.setOrder);
   const clear = useCurrentOrder((s) => s.clear);
   const categories = useCatalog((s) => s.categories);
+
+  /** Server snapshot already cancelled → drop the cart immediately so
+   *  the operator can't keep mutating a stale id. */
+  const assertOrderUsable = useCallback(
+    (remote: RestaurantOrder, orderId: string | null) => {
+      if (remote.status === 'cancelled' || remote.status === 'refunded') {
+        clear();
+        throw new OrderClosedError(
+          'Comanda a fost anulată pe alt dispozitiv.',
+          orderId,
+          'cancelled',
+        );
+      }
+    },
+    [clear],
+  );
 
   const stationFor = useMemo(() => {
     const map = new Map<string, string | null>(
@@ -78,75 +122,71 @@ export function useOrderActions() {
       categoryId == null ? null : (map.get(categoryId) ?? null);
   }, [categories]);
 
+  // ── Online-first cart actions ──────────────────────────────────────
+
   const newOrder = useCallback(
     async (tableId: string | null = null) => {
+      if (!isReachable()) throw new OfflineMutationError('newOrder');
       const ctx = buildCtx();
-      // Online + table tap → mirror browser POS: server is the source of
-      // truth for "is there already a draft on this table". The 409
-      // conflict path inside openTableViaRest re-fetches the existing
-      // draft, so we never spawn a duplicate RestaurantOrder. Walk-in /
-      // tableless drafts go straight to create().
-      if (ctx.online) {
-        try {
-          const remote = tableId
-            ? await openTableViaRest(tableId)
-            : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
-          const next = restaurantOrderToOrder(remote, ctx.deviceId);
-          setOrder(next);
-          logger.info('pos.order', 'newOrder via REST', {
-            orderId: remote.id,
-            tableId,
-            existing: remote.items.length > 0,
-          });
-          return next;
-        } catch (err) {
-          logger.error('pos.order', 'newOrder REST failed, falling back to local', {
-            err: String(err),
-          });
-        }
+      try {
+        const remote = tableId
+          ? await openTableViaRest(tableId)
+          : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
+        const next = restaurantOrderToOrder(remote, ctx.deviceId);
+        setOrder(next);
+        logger.info('pos.order', 'newOrder via REST', {
+          orderId: remote.id,
+          tableId,
+          existing: remote.items.length > 0,
+        });
+        return next;
+      } catch (err) {
+        logger.error('pos.order', 'newOrder REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'newOrder', null);
       }
-      const r = await runAction(() =>
-        createOrder({ tableId, vatConfig: vatConfigDefault() }, ctx),
-      );
-      setOrder(r.next);
-      return r.next;
     },
     [setOrder],
   );
 
-  /**
-   * Sprint 11.8 — mirror the browser POS pattern (selectOrStartOnTable):
-   * if the table already has an open remote order, load it into the
-   * cart instead of creating a new draft. The resumed order keeps the
-   * server id, so any subsequent addItem / sendToKitchen events go
-   * against the existing RestaurantOrder server-side, not a duplicate.
-   */
   const resumeOrder = useCallback(
     async (orderId: string) => {
+      // Resume is read-only; we still allow it from the local cache
+      // when offline so the operator can SEE a cached order. Mutations
+      // on it will be blocked by the action handlers above.
       const ctx = buildCtx();
-      // Prefer the server snapshot when online so the cart shows the
-      // canonical state (matches the browser POS behaviour).
-      if (ctx.online) {
+      if (isReachable()) {
         try {
           const remote = await restaurantOrdersApi.get(orderId);
+          assertOrderUsable(remote, orderId);
           const next = restaurantOrderToOrder(remote, ctx.deviceId);
           setOrder(next);
-          logger.info('pos.order', 'resumed via REST', { orderId, items: remote.items.length });
+          logger.info('pos.order', 'resumed via REST', {
+            orderId,
+            items: remote.items.length,
+          });
           return next;
         } catch (err) {
-          logger.warn('pos.order', 'REST resume failed, falling back to local', { err: String(err) });
+          if (err instanceof OrderClosedError) throw err;
+          logger.warn('pos.order', 'REST resume failed, falling back to cache', {
+            err: String(err),
+          });
         }
       }
+      // Offline → load read-only snapshot from the cache.
+      const { getSyncEngine } = await import('@/lib/sync/bootstrap');
+      const { loadOrderFromRemote } = await import('@/lib/sync/resumeOrder');
       const engine = getSyncEngine();
       if (!engine) return null;
       const loaded = await loadOrderFromRemote(engine.exec, orderId);
       if (loaded) setOrder(loaded);
       return loaded;
     },
-    [setOrder],
+    [setOrder, assertOrderUsable],
   );
 
-  // Sprint 9 — non-table intake with customer fields.
+  // Walk-in / delivery still goes through the event-sourced path
+  // because the server-side draft-create path for those sources hasn't
+  // been wired yet. Kept verbatim from before; not in the Faza 2 list.
   const newOrderWithCustomer = useCallback(
     async (
       source: 'walkin' | 'home_delivery',
@@ -172,75 +212,185 @@ export function useOrderActions() {
 
   const addProduct = useCallback(
     async (p: ProductRow) => {
+      if (!isReachable()) throw new OfflineMutationError('addProduct');
       const ctx = buildCtx();
-      const station = stationFor(p.category_id);
-
-      // Sprint 12 (REST direct) — when the desktop is online we hit the
-      // same /api/restaurant/orders endpoints the browser POS uses. The
-      // event-sourced pos-core path stays as the offline fallback below.
-      if (ctx.online) {
-        try {
-          let serverId = order?.serverId ?? null;
-          if (!serverId) {
-            // No server-side draft yet → create one. Mirrors the browser
-            // pattern (selectOrStartOnTable). The 409 conflict on a busy
-            // table is handled inside openTableViaRest by re-fetching.
-            const created = order?.tableId
-              ? await openTableViaRest(order.tableId)
-              : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
-            serverId = created.id;
-            logger.info('pos.order', 'created server draft for add-product', {
-              orderId: serverId,
-              tableId: order?.tableId ?? null,
-            });
-          }
-          const updated = await restaurantOrdersApi.addItem(serverId, {
-            menuItemId: p.id,
-            quantity: 1,
-          });
-          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-          logger.info('pos.order', 'item added via REST', {
+      void stationFor; // keep memo dependency stable; station is now server-driven
+      try {
+        let serverId = order?.serverId ?? null;
+        if (!serverId) {
+          const created = order?.tableId
+            ? await openTableViaRest(order.tableId)
+            : await restaurantOrdersApi.create({ source: 'pos', tableId: null });
+          serverId = created.id;
+          logger.info('pos.order', 'created server draft for add-product', {
             orderId: serverId,
-            productId: p.id,
-            productName: p.name,
-            items: updated.items.length,
+            tableId: order?.tableId ?? null,
           });
-          return;
-        } catch (err) {
-          const apiErr = err instanceof RestaurantOrderApiError ? err : null;
-          logger.error('pos.order', 'addItem REST failed', {
-            err: apiErr?.message ?? String(err),
-            status: apiErr?.status ?? null,
-            detail: apiErr?.detail ?? null,
-          });
-          // Re-throw so the UI panel can show a toast / alert.
-          throw err;
         }
+        const updated = await restaurantOrdersApi.addItem(serverId, {
+          menuItemId: p.id,
+          quantity: 1,
+        });
+        assertOrderUsable(updated, serverId);
+        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+        logger.info('pos.order', 'item added via REST', {
+          orderId: serverId,
+          productId: p.id,
+          productName: p.name,
+          items: updated.items.length,
+        });
+      } catch (err) {
+        const apiErr = err instanceof RestaurantOrderApiError ? err : null;
+        logger.error('pos.order', 'addItem REST failed', {
+          err: apiErr?.message ?? String(err),
+          status: apiErr?.status ?? null,
+          detail: apiErr?.detail ?? null,
+        });
+        classifyMutationFailure(err, 'addProduct', order?.serverId ?? null);
       }
-
-      // Offline fallback: original event-sourced flow.
-      const current = order ?? (await newOrder(null));
-      const r = await runAction(() =>
-        addItem(
-          current,
-          {
-            productId: p.id,
-            productName: p.name,
-            quantity: 1,
-            unitPriceCents: p.price_cents,
-            categoryType: categoryTypeForStation(station),
-          },
-          ctx,
-        ),
-      );
-      setOrder(r.next);
-      logger.info('pos.order', 'item added via local event (offline)', {
-        productId: p.id,
-        productName: p.name,
-      });
     },
-    [order, newOrder, setOrder, stationFor],
+    [order, setOrder, stationFor, assertOrderUsable],
   );
+
+  const incrementQuantity = useCallback(
+    async (itemId: string) => {
+      if (!order || !order.serverId) {
+        throw new OfflineMutationError('incrementQuantity');
+      }
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      if (!isReachable()) throw new OfflineMutationError('incrementQuantity');
+      const ctx = buildCtx();
+      try {
+        const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
+          quantity: item.quantity + 1,
+        });
+        assertOrderUsable(updated, order.serverId);
+        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+        logger.info('pos.order', 'qty++ via REST', {
+          orderId: order.serverId,
+          itemId,
+        });
+      } catch (err) {
+        logger.error('pos.order', 'updateItem REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'incrementQuantity', order.serverId);
+      }
+    },
+    [order, setOrder, assertOrderUsable],
+  );
+
+  const decrementQuantity = useCallback(
+    async (itemId: string) => {
+      if (!order || !order.serverId) {
+        throw new OfflineMutationError('decrementQuantity');
+      }
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      if (!isReachable()) throw new OfflineMutationError('decrementQuantity');
+      const ctx = buildCtx();
+      try {
+        if (item.quantity <= 1) {
+          const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
+          assertOrderUsable(updated, order.serverId);
+          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+          logger.info('pos.order', 'item voided via REST (qty=0)', {
+            orderId: order.serverId,
+            itemId,
+          });
+        } else {
+          const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
+            quantity: item.quantity - 1,
+          });
+          assertOrderUsable(updated, order.serverId);
+          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+          logger.info('pos.order', 'qty-- via REST', {
+            orderId: order.serverId,
+            itemId,
+          });
+        }
+      } catch (err) {
+        logger.error('pos.order', 'decrement REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'decrementQuantity', order.serverId);
+      }
+    },
+    [order, setOrder, assertOrderUsable],
+  );
+
+  const removeItem = useCallback(
+    async (itemId: string, reason: string = 'removed by waiter') => {
+      if (!order || !order.serverId) {
+        throw new OfflineMutationError('removeItem');
+      }
+      const item = order.items.find((it) => it.id === itemId);
+      if (!item || item.voidedAt) return;
+      if (!isReachable()) throw new OfflineMutationError('removeItem');
+      const ctx = buildCtx();
+      try {
+        const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
+        assertOrderUsable(updated, order.serverId);
+        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+        logger.info('pos.order', 'item removed via REST', {
+          orderId: order.serverId,
+          itemId,
+          reason,
+        });
+      } catch (err) {
+        logger.error('pos.order', 'removeItem REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'removeItem', order.serverId);
+      }
+    },
+    [order, setOrder, assertOrderUsable],
+  );
+
+  const sendOrderToKitchen = useCallback(async () => {
+    if (!order || !order.serverId) {
+      throw new OfflineMutationError('sendOrderToKitchen');
+    }
+    if (!isReachable()) throw new OfflineMutationError('sendOrderToKitchen');
+    const ctx = buildCtx();
+    try {
+      const updated = await restaurantOrdersApi.sendToKitchen(order.serverId);
+      assertOrderUsable(updated, order.serverId);
+      setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+      logger.info('pos.order', 'sent to kitchen via REST', {
+        orderId: order.serverId,
+        tickets: updated.kitchenTickets.length,
+      });
+    } catch (err) {
+      logger.error('pos.order', 'sendToKitchen REST failed', { err: String(err) });
+      classifyMutationFailure(err, 'sendOrderToKitchen', order.serverId);
+    }
+  }, [order, setOrder, assertOrderUsable]);
+
+  const cancelCurrentOrder = useCallback(
+    async (reason: string = 'anulat din POS') => {
+      if (!order || !order.serverId) {
+        throw new OfflineMutationError('cancelCurrentOrder');
+      }
+      if (!isReachable()) throw new OfflineMutationError('cancelCurrentOrder');
+      try {
+        await restaurantOrdersApi.cancel(order.serverId, reason);
+        logger.info('pos.order', 'cancelled via REST', {
+          orderId: order.serverId,
+          reason,
+        });
+        clear();
+      } catch (err) {
+        if (err instanceof RestaurantOrderApiError) {
+          const closed = classifyOrderMutationError(err, order.serverId);
+          if (closed) {
+            clear();
+            throw closed;
+          }
+        }
+        logger.error('pos.order', 'cancel REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'cancelCurrentOrder', order.serverId);
+      }
+    },
+    [order, clear],
+  );
+
+  // ── Payment helpers (cash offline / card) — refactored elsewhere ──
 
   const payCash = useCallback(async () => {
     if (!order) return;
@@ -255,211 +405,53 @@ export function useOrderActions() {
     setOrder(r.next);
   }, [order, setOrder]);
 
-  const incrementQuantity = useCallback(
-    async (itemId: string) => {
-      if (!order) return;
-      const item = order.items.find((it) => it.id === itemId);
-      if (!item || item.voidedAt) return;
-      const ctx = buildCtx();
-      if (ctx.online && order.serverId) {
-        try {
-          const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
-            quantity: item.quantity + 1,
-          });
-          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-          logger.info('pos.order', 'qty++ via REST', { orderId: order.serverId, itemId });
-          return;
-        } catch (err) {
-          logger.error('pos.order', 'updateItem REST failed', { err: String(err) });
-          throw err;
-        }
-      }
-      const r = await runAction(() =>
-        setItemQuantity(order, { itemId, quantity: item.quantity + 1 }, ctx),
-      );
-      setOrder(r.next);
-    },
-    [order, setOrder],
-  );
-
-  const decrementQuantity = useCallback(
-    async (itemId: string) => {
-      if (!order) return;
-      const item = order.items.find((it) => it.id === itemId);
-      if (!item || item.voidedAt) return;
-      const ctx = buildCtx();
-      if (ctx.online && order.serverId) {
-        try {
-          if (item.quantity <= 1) {
-            const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
-            setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-            logger.info('pos.order', 'item voided via REST (qty=0)', { orderId: order.serverId, itemId });
-          } else {
-            const updated = await restaurantOrdersApi.updateItem(order.serverId, itemId, {
-              quantity: item.quantity - 1,
-            });
-            setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-            logger.info('pos.order', 'qty-- via REST', { orderId: order.serverId, itemId });
-          }
-          return;
-        } catch (err) {
-          logger.error('pos.order', 'decrement REST failed', { err: String(err) });
-          throw err;
-        }
-      }
-      // Offline fallback.
-      if (item.quantity <= 1) {
-        const r = await runAction(() =>
-          voidItem(order, { itemId, reason: 'qty zero' }, ctx),
-        );
-        setOrder(r.next);
-      } else {
-        const r = await runAction(() =>
-          setItemQuantity(order, { itemId, quantity: item.quantity - 1 }, ctx),
-        );
-        setOrder(r.next);
-      }
-    },
-    [order, setOrder],
-  );
-
-  const removeItem = useCallback(
-    async (itemId: string, reason: string = 'removed by waiter') => {
-      if (!order) return;
-      const item = order.items.find((it) => it.id === itemId);
-      if (!item || item.voidedAt) return;
-      const ctx = buildCtx();
-      if (ctx.online && order.serverId) {
-        try {
-          const updated = await restaurantOrdersApi.removeItem(order.serverId, itemId);
-          setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-          logger.info('pos.order', 'item removed via REST', {
-            orderId: order.serverId,
-            itemId,
-            reason,
-          });
-          return;
-        } catch (err) {
-          logger.error('pos.order', 'removeItem REST failed', { err: String(err) });
-          throw err;
-        }
-      }
-      const r = await runAction(() =>
-        voidItem(order, { itemId, reason }, ctx),
-      );
-      setOrder(r.next);
-    },
-    [order, setOrder],
-  );
-
-  const sendOrderToKitchen = useCallback(async () => {
-    if (!order) return;
-    const ctx = buildCtx();
-    if (ctx.online && order.serverId) {
-      try {
-        const updated = await restaurantOrdersApi.sendToKitchen(order.serverId);
-        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
-        logger.info('pos.order', 'sent to kitchen via REST', {
-          orderId: order.serverId,
-          tickets: updated.kitchenTickets.length,
-        });
-        return;
-      } catch (err) {
-        logger.error('pos.order', 'sendToKitchen REST failed', { err: String(err) });
-        throw err;
-      }
-    }
-    // Offline (or no server draft yet) → local event-sourced send. The
-    // backend can't print for us in this branch, so we drive the
-    // kitchen printer directly from the desktop using the cached
-    // tenant-wide config (Sprint 12 offline fallback). Server reconciles
-    // tickets on the next sync and skips re-printing because each
-    // ticket's `printed_at` is stamped server-side only when the
-    // backend itself drives the print.
-    const r = await runAction(() => sendToKitchen(order, {}, ctx));
-    setOrder(r.next);
-    const localTickets = (r as unknown as { tickets?: Array<{ station: string; payload: { items: Array<{ name: string; quantity: number; modifiers: Record<string, unknown> }> } }> }).tickets;
-    if (localTickets && localTickets.length > 0) {
-      const tableLabel = order.tableId ? String(order.tableId).slice(0, 8) : null;
-      const orderShortId = order.id ? String(order.id).slice(0, 8) : null;
-      for (const t of localTickets) {
-        try {
-          const outcome = await printKitchenTicketLocal(
-            t.station,
-            { tableLabel, orderShortId, printedAt: new Date() },
-            t.payload.items.map((it) => ({
-              quantity: it.quantity,
-              nameSnapshot: it.name,
-            })),
-          );
-          if (outcome.ok) {
-            logger.info('pos.print', 'local kitchen ticket printed', {
-              station: t.station,
-              host: outcome.host,
-              bytes: outcome.bytes,
-            });
-          } else {
-            logger.warn('pos.print', 'local kitchen ticket print failed', {
-              station: t.station,
-              reason: outcome.reason,
-              error: outcome.error,
-            });
-          }
-        } catch (err) {
-          logger.error('pos.print', 'local print threw', {
-            station: t.station,
-            err: String(err),
-          });
-        }
-      }
-    }
-  }, [order, setOrder]);
-
-  // Sprint 11.9 — mirror browser POS cancelOrder. The pos-core action
-  // already enforces "not fiscalised" + state-machine guard; the
-  // backend forwarder marks RestaurantOrder cancelled so the table
-  // frees up. We clear the cart locally on success so the operator
-  // lands back on the empty Tables view (same UX as web POS where
-  // setActiveOrderId(null) runs after cancel).
-  const cancelCurrentOrder = useCallback(
-    async (reason: string = 'anulat din POS') => {
-      if (!order) return;
-      const ctx = buildCtx();
-      if (ctx.online && order.serverId) {
-        try {
-          await restaurantOrdersApi.cancel(order.serverId, reason);
-          logger.info('pos.order', 'cancelled via REST', { orderId: order.serverId, reason });
-          clear();
-          return;
-        } catch (err) {
-          logger.error('pos.order', 'cancel REST failed', { err: String(err) });
-          throw err;
-        }
-      }
-      try {
-        await runAction(() => cancelOrder(order, { reason }, ctx));
-        clear();
-      } catch (err) {
-        throw err;
-      }
-    },
-    [order, clear],
-  );
-
-  // Sprint 7 — explicit cash with arbitrary amount (modal-driven).
+  /**
+   * Faza 2 — cash payment flow.
+   *   Online → POST /payments with Idempotency-Key (server fiscalises).
+   *   Offline → DP-25X emits the bon, outbox row queued for sync.
+   * Cash is forbidden on local-only drafts (no `serverId`) because the
+   * worker needs a server order id to post against later.
+   */
   const payCashAmount = useCallback(
-    async (amountCents: number, acceptOverTender = false) => {
+    async (amountCents: number, _acceptOverTender = false) => {
       if (!order) return;
+      void _acceptOverTender; // tender > total handled by the modal UI
+      if (!order.serverId) {
+        throw new CashFlowError(
+          'OFFLINE_NO_SERVER_ORDER',
+          'Comanda nu este sincronizată cu serverul. Salvează comanda online înainte de a încasa cash.',
+        );
+      }
+      const restaurant = useAuthStore.getState().selectedRestaurant;
+      if (!restaurant) {
+        throw new CashFlowError(
+          'NO_RESTAURANT_CTX',
+          'Nu există restaurant selectat în profilul curent.',
+        );
+      }
       const ctx = buildCtx();
-      const r = await runAction(() =>
-        registerCashPayment(order, { amountCents, acceptOverTender }, ctx),
-      );
-      setOrder(r.next);
+      const outcome = await runCashFlow({
+        serverOrderId: order.serverId,
+        restaurantId: restaurant.id,
+        amountCents,
+      });
+      if (outcome.kind === 'online') {
+        setOrder(restaurantOrderToOrder(outcome.order, ctx.deviceId));
+      } else {
+        // Offline — reflect "paid" locally so the cart UI updates. The
+        // sync worker will reconcile with the server when reachable.
+        // We mark the order as paid + closed in the local cart slot;
+        // the cached `remote_orders` row keeps the prior status until
+        // the next pull (which only succeeds online anyway).
+        const r = await runAction(() =>
+          registerCashPayment(order, { amountCents, acceptOverTender: false }, ctx),
+        );
+        setOrder(r.next);
+      }
     },
     [order, setOrder],
   );
 
-  // Sprint 7 — card outcome from the simulator/two-step modal.
   const recordCardOutcome = useCallback(
     async (
       amountCents: number,
@@ -502,4 +494,12 @@ export function useOrderActions() {
     cancelCurrentOrder,
     clear,
   };
+}
+
+// Re-export so PosShell can branch on offline-mutation toasts.
+export { OfflineMutationError };
+
+// Helper used by PosShell's read-only check.
+export function isOrderEditable(orderHasServerId: boolean): boolean {
+  return orderHasServerId && isReachable();
 }

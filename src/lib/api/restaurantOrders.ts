@@ -118,6 +118,18 @@ export interface PaymentInput {
   amount: number;
   reference?: string;
   customerCif?: string;
+  // Faza 2 — fiscal pass-through used by the cash-offline sync worker.
+  // When the desktop emitted the bon fiscal locally (DP-25X), it attaches
+  // the receipt number + source so the backend skips its own issuance.
+  fiscalReceiptNumber?: string;
+  fiscalizationSource?: 'cloud' | 'device_offline';
+}
+
+export interface PaymentRequestOptions {
+  /** Sent as the `Idempotency-Key` HTTP header. The server stores the
+   *  response under this key so a retry returns the original outcome
+   *  without creating a duplicate payment. */
+  idempotencyKey?: string;
 }
 
 /** Custom error type that preserves the HTTP status so callers can branch
@@ -134,6 +146,64 @@ export class RestaurantOrderApiError extends Error {
     this.detail = detail;
     this.existingOrderId = existingOrderId;
   }
+}
+
+/** Thrown when a mutation targets an order that the server says is no
+ *  longer mutable (cancelled / closed / paid / not found). Caller should
+ *  clear the cart and prompt the operator to re-pick the table. */
+export class OrderClosedError extends Error {
+  readonly orderId: string | null;
+  readonly reason: 'cancelled' | 'not_found' | 'closed';
+  constructor(message: string, orderId: string | null, reason: 'cancelled' | 'not_found' | 'closed') {
+    super(message);
+    this.name = 'OrderClosedError';
+    this.orderId = orderId;
+    this.reason = reason;
+  }
+}
+
+/** Thrown when a cart mutation is attempted while the desktop is offline
+ *  (or the REST call hit a transport failure). Faza 2 — POS desktop is
+ *  online-first; we never write speculative mutations into local SQLite
+ *  for new-order/add-item/send-to-kitchen/etc. UI catches this and shows
+ *  a friendly "offline" toast while keeping cached orders read-only. */
+export class OfflineMutationError extends Error {
+  readonly action: string;
+  constructor(action: string, message?: string) {
+    super(
+      message ??
+        'Comenzile sunt read-only cât timp ești offline. Așteaptă revenirea conexiunii.',
+    );
+    this.name = 'OfflineMutationError';
+    this.action = action;
+  }
+}
+
+/** Map a backend mutation error onto OrderClosedError when the message
+ *  indicates the order is no longer mutable. The backend returns 400
+ *  with a Romanian detail string ("Comandă anulată — ...") for cancelled
+ *  orders and 404 when the order id doesn't exist. Both mean the same
+ *  thing for the cart: drop it. */
+export function classifyOrderMutationError(
+  err: RestaurantOrderApiError,
+  orderId: string | null,
+): OrderClosedError | null {
+  const msg = (err.message || '').toLowerCase();
+  if (err.status === 404 && msg.includes('comanda')) {
+    return new OrderClosedError(
+      'Comanda nu mai există pe server.',
+      orderId,
+      'not_found',
+    );
+  }
+  if (err.status === 400 && (msg.includes('anulat') || msg.includes('cancelled'))) {
+    return new OrderClosedError(
+      'Comanda a fost anulată pe alt dispozitiv.',
+      orderId,
+      'cancelled',
+    );
+  }
+  return null;
 }
 
 function wrap(err: unknown): RestaurantOrderApiError {
@@ -228,11 +298,20 @@ export const restaurantOrdersApi = {
     }
   },
 
-  recordPayment: async (orderId: string, input: PaymentInput): Promise<RestaurantOrder> => {
+  recordPayment: async (
+    orderId: string,
+    input: PaymentInput,
+    opts: PaymentRequestOptions = {},
+  ): Promise<RestaurantOrder> => {
     try {
+      const headers: Record<string, string> = {};
+      if (opts.idempotencyKey) {
+        headers['Idempotency-Key'] = opts.idempotencyKey;
+      }
       const res = await getApiClient().post<RestaurantOrder>(
         `/api/restaurant/orders/${orderId}/payments`,
         input,
+        { headers },
       );
       return res.data;
     } catch (err) {

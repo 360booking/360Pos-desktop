@@ -17,6 +17,7 @@ import { logger } from '@/lib/logger';
 import { isAccessTokenStale, readAccessToken, useAuthStore } from '@/store/auth';
 import { refresh as refreshAccessToken } from '@/lib/api/auth';
 import { rememberHealth } from '@/lib/api/healthLast';
+import { recordFailure, recordSuccess } from '@/lib/reachability';
 
 declare module 'axios' {
   interface AxiosRequestConfig {
@@ -90,10 +91,19 @@ export function getApiClient(): AxiosInstance {
   });
 
   _client.interceptors.response.use(
-    (resp) => resp,
+    (resp) => {
+      // Faza 2 — every successful round-trip resets the offline counter
+      // and flips us back online if we were marked offline.
+      recordSuccess();
+      return resp;
+    },
     async (error: AxiosError) => {
       const cfg = error.config as InternalAxiosRequestConfig | undefined;
       const status = error.response?.status;
+      // Feed the reachability detector. It internally ignores 4xx so a
+      // business rejection (cancelled order, validation) doesn't trip
+      // the offline banner.
+      recordFailure(error);
       if (!cfg || cfg._retried || cfg.skipAuth || status !== 401) {
         return Promise.reject(error);
       }

@@ -15,6 +15,9 @@ import { useOrderActions } from './useOrderActions';
 import { useCatalog } from '@/store/catalog';
 import { useRemote } from '@/store/remote';
 import { pushToast } from '@/features/ui/Toast';
+import { OrderClosedError, OfflineMutationError } from '@/lib/api/restaurantOrders';
+import { CashFlowError } from '@/lib/cashOfflineFlow';
+import { OfflineBanner, UnsyncedAlert } from './OfflineSyncBanners';
 import { useAuthStore } from '@/store/auth';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
 import { runBootstrap } from '@/lib/sync/runBootstrap';
@@ -49,6 +52,50 @@ export function PosShell() {
     () => (actions.order ? computeTotals(actions.order) : EMPTY_TOTALS),
     [actions.order],
   );
+
+  /** Centralised error handler for cart mutations. OrderClosedError is
+   *  not really an error from the operator's POV — the cart was pointing
+   *  at a stale order that the server already cancelled (typical: another
+   *  device cancelled it). useOrderActions has already cleared the cart
+   *  by the time we get here, so we just surface a friendly warning
+   *  prompting the operator to re-pick the table. Anything else is shown
+   *  as the original error message. */
+  function handleMutationError(err: unknown, fallbackTitle?: string) {
+    if (err instanceof OrderClosedError) {
+      pushToast({
+        level: 'warning',
+        title: 'Comandă închisă',
+        message: `${err.message} Selectează din nou masa pentru a continua.`,
+      });
+      return;
+    }
+    if (err instanceof OfflineMutationError) {
+      // Faza 2 — desktop is online-first; mutations are blocked when
+      // unreachable. Surface a single coherent toast and let the UI
+      // banner explain the surrounding state.
+      pushToast({
+        level: 'warning',
+        title: 'Offline',
+        message:
+          'Nu pot face modificări la comenzi cât timp ești offline. ' +
+          'Așteaptă revenirea conexiunii.',
+      });
+      return;
+    }
+    if (err instanceof CashFlowError) {
+      // Cash-offline gate. Each code maps to a specific blocking
+      // message defined in the spec — surface verbatim so the operator
+      // sees the same string on every device.
+      pushToast({
+        level: err.code === 'OFFLINE_NO_FISCAL_DEVICE' ? 'error' : 'warning',
+        title: 'Plată cash blocată',
+        message: err.message,
+      });
+      return;
+    }
+    const msg = (err as { message?: string })?.message ?? String(err);
+    pushToast({ level: 'error', title: fallbackTitle, message: msg });
+  }
 
   // Modal states. ClaimOrderModal opens when the operator taps a remote
   // table whose lock is held by another device. PaymentModal opens from
@@ -111,6 +158,10 @@ export function PosShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeOrderId, remoteOrdersForRefresh]);
 
+  function withMutationErrorHandler(p: Promise<unknown>): void {
+    void p.catch((err: unknown) => handleMutationError(err));
+  }
+
   function handleTablePick(tableId: string) {
     // Sprint 11.8 — match the browser POS pattern (selectOrStartOnTable):
     // an open remote order on this table is RESUMED into the cart, not
@@ -128,10 +179,10 @@ export function PosShell() {
       return;
     }
     if (remote) {
-      void actions.resumeOrder(remote.id);
+      withMutationErrorHandler(actions.resumeOrder(remote.id));
       return;
     }
-    void actions.newOrder(tableId);
+    withMutationErrorHandler(actions.newOrder(tableId));
   }
 
   function onClaimedFromModal() {
@@ -143,7 +194,7 @@ export function PosShell() {
     void engine?.pullScheduler.runNow();
     // Sprint 11.8 — after claiming, resume the existing order into the
     // cart (mirror browser POS behaviour: claim = take over editing).
-    if (claimedId) void actions.resumeOrder(claimedId);
+    if (claimedId) withMutationErrorHandler(actions.resumeOrder(claimedId));
   }
 
   return (
@@ -153,6 +204,8 @@ export function PosShell() {
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      <OfflineBanner />
+      <UnsyncedAlert />
       <RestaurantAlertBanner />
       <KitchenQueueStrip />
       <div className="flex-1 flex min-h-0 overflow-hidden">
@@ -164,14 +217,9 @@ export function PosShell() {
         />
         <MenuPane
           onPickProduct={(p) => {
-            void actions.addProduct(p).catch((err: unknown) => {
-              const msg = (err as { message?: string })?.message ?? String(err);
-              pushToast({
-                level: 'error',
-                title: 'Nu am putut adăuga produsul',
-                message: msg,
-              });
-            });
+            void actions.addProduct(p).catch((err: unknown) =>
+              handleMutationError(err, 'Nu am putut adăuga produsul'),
+            );
           }}
         />
         <CartPane
@@ -180,34 +228,31 @@ export function PosShell() {
           onCash={() => setPaymentOpen(true)}
           onClear={() => actions.clear()}
           onIncrement={(id) =>
-            void actions.incrementQuantity(id).catch((err: unknown) => {
-              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
-            })
+            void actions.incrementQuantity(id).catch((err: unknown) =>
+              handleMutationError(err),
+            )
           }
           onDecrement={(id) =>
-            void actions.decrementQuantity(id).catch((err: unknown) => {
-              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
-            })
+            void actions.decrementQuantity(id).catch((err: unknown) =>
+              handleMutationError(err),
+            )
           }
           onRemove={(id) =>
-            void actions.removeItem(id).catch((err: unknown) => {
-              pushToast({ level: 'error', message: (err as { message?: string })?.message ?? String(err) });
-            })
+            void actions.removeItem(id).catch((err: unknown) =>
+              handleMutationError(err),
+            )
           }
           onSendToKitchen={() =>
-            void actions.sendOrderToKitchen().catch((err: unknown) => {
-              pushToast({ level: 'error', title: 'Trimitere kitchen eșuată', message: (err as { message?: string })?.message ?? String(err) });
-            })
+            void actions.sendOrderToKitchen().catch((err: unknown) =>
+              handleMutationError(err, 'Trimitere kitchen eșuată'),
+            )
           }
           onCancel={() => {
             if (!actions.order) return;
             if (!confirm('Anulezi comanda? Nu se va mai factura.')) return;
-            void actions.cancelCurrentOrder().catch((err: unknown) => {
-              alert(
-                (err as { message?: string })?.message
-                  ?? 'Nu am putut anula comanda.',
-              );
-            });
+            void actions.cancelCurrentOrder().catch((err: unknown) =>
+              handleMutationError(err, 'Nu am putut anula comanda'),
+            );
           }}
         />
       </div>

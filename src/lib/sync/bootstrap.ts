@@ -230,6 +230,47 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     isOnline: () => cfg.syncTransportMode === 'http',
   });
 
+  // Faza 2 — drain offline-collected cash payments. The worker is
+  // idle while reachability is false; an axios success flips it back
+  // online and the next tick (or runNow on reconnect) drains the
+  // queue. After every tick we refresh outbox counts in the UI store
+  // so the unsynced badge reflects reality without polling from React.
+  const { startLocalPaymentSyncWorker } = await import('./localPaymentSyncWorker');
+  const { countByStatus } = await import('@/lib/db/localPaymentOutbox');
+  const { useSyncStatus } = await import('@/store/syncStatus');
+  const { pushToast } = await import('@/features/ui/Toast');
+  const localPaymentSyncWorker = startLocalPaymentSyncWorker({
+    exec,
+    onResult: (r) => {
+      void countByStatus(exec).then((counts) => {
+        useSyncStatus.getState().setCounts(counts);
+      });
+      if (r.synced > 0) {
+        useSyncStatus.getState().noteSyncSuccess();
+        pushToast({
+          level: 'success',
+          title: 'Sincronizare cash',
+          message:
+            r.synced === 1
+              ? 'Plată sincronizată cu succes.'
+              : `${r.synced} plăți sincronizate cu succes.`,
+        });
+      }
+      if (r.failed > 0) {
+        pushToast({
+          level: 'error',
+          title: 'Sincronizare eșuată',
+          message: `Plata nu a putut fi sincronizată. Verifică manual.`,
+        });
+      }
+    },
+  });
+  // Hydrate counts on engine start so the UI doesn't show 0/0 until the
+  // first tick fires.
+  void countByStatus(exec).then((counts) => {
+    useSyncStatus.getState().setCounts(counts);
+  });
+
   _schedulersStarted = true;
 
   // Sprint 11 — auto-start the diagnostic-log shipper when debug is on,
@@ -248,6 +289,7 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
     bootstrapScheduler.stop();
     pullScheduler.stop();
     heartbeatScheduler.stop();
+    localPaymentSyncWorker.stop();
     stopShipper();
     offDebugToggle();
     detachExecutorForLogs();
