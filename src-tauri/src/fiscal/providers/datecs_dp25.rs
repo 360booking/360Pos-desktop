@@ -40,6 +40,16 @@ pub struct CmdCodes {
     /// re-registers the items being voided. Wire format is firmware-dependent
     /// — verify on real hardware before going live (see fiscal-port-status §A2).
     pub cancel_fiscal: u16,
+    /// Pop the cash drawer pulse. Datecs FP-55/DP-25 maps this to 0x6A.
+    /// Configurable so a tenant with a non-standard firmware can override
+    /// without recompiling.
+    pub open_drawer: u16,
+    /// Reprint the LAST fiscal receipt as a duplicate copy. 0x6D on FP-55
+    /// per programmer's manual §3.7. Body is empty.
+    pub reprint_last: u16,
+    /// Print a periodic-memory report between two dates. 0x4F on FP-55.
+    /// Payload is `<from>\t<to>` with dates DDMMYY (no separators).
+    pub periodic_memory: u16,
 }
 
 impl Default for CmdCodes {
@@ -59,6 +69,9 @@ impl Default for CmdCodes {
             z_report: 0x45,
             status: 0x4A,
             cancel_fiscal: 0x32,
+            open_drawer: 0x6A,
+            reprint_last: 0x6D,
+            periodic_memory: 0x4F,
         }
     }
 }
@@ -427,6 +440,71 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
             fiscal_number: None,
             fiscal_date: Some(now_iso()),
             raw_trace: format!("datecs_dp25 x_report cmd=0x{:02X} bytes={}", reply.cmd, dump),
+            error_code: None,
+            error_message: None,
+        })
+    }
+
+    fn open_cash_drawer(&self) -> Result<(), FiscalError> {
+        // Drawer kick-out pulse. FP-55 cmd 0x6A with empty body fires the
+        // default pulse width (~50ms). Some firmwares accept "1" or "0\t0"
+        // payloads to choose pin / pulse width — left empty here, override
+        // via cmd_codes if a tenant ever needs different.
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let _ = t.execute(self.cfg.cmd_codes.open_drawer, b"")?;
+        t.close();
+        Ok(())
+    }
+
+    fn reprint_last_receipt(&self) -> Result<ReceiptResponse, FiscalError> {
+        // FP-55 cmd 0x6D: print a labelled DUPLICATE of the last fiscal
+        // receipt. Body empty. Compliance: ROM regulation requires the
+        // header "COPIE" / "DUPLICATE" — Datecs firmware adds it itself.
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let reply = t.execute(self.cfg.cmd_codes.reprint_last, b"")?;
+        t.close();
+        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: None,
+            fiscal_date: Some(now_iso()),
+            raw_trace: format!("datecs_dp25 reprint_last cmd=0x{:02X} bytes={}", reply.cmd, dump),
+            error_code: None,
+            error_message: None,
+        })
+    }
+
+    fn print_periodic_memory(
+        &self,
+        date_from: &str,
+        date_to: &str,
+    ) -> Result<ReceiptResponse, FiscalError> {
+        // Periodic memory readout between two dates. FP-55 cmd 0x4F with
+        // payload `<from>\t<to>` where each date is DDMMYY (no separators).
+        // Caller is responsible for the date format — we don't reformat
+        // here so the provider stays stateless about Romanian/Bulgarian
+        // calendar quirks.
+        if date_from.is_empty() || date_to.is_empty() {
+            return Err(FiscalError::InvalidCommand {
+                detail: "periodic_memory: date_from and date_to are required".into(),
+            });
+        }
+        let payload = format!("{date_from}\t{date_to}");
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let reply = t.execute(self.cfg.cmd_codes.periodic_memory, payload.as_bytes())?;
+        t.close();
+        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: None,
+            fiscal_date: Some(now_iso()),
+            raw_trace: format!(
+                "datecs_dp25 periodic_memory cmd=0x{:02X} {}..{} bytes={}",
+                reply.cmd, date_from, date_to, dump
+            ),
             error_code: None,
             error_message: None,
         })

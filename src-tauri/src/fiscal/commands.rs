@@ -308,6 +308,43 @@ pub fn fiscal_request_z_confirm() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn fiscal_print_x_report(app: tauri::AppHandle) -> Result<ReceiptResponse, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
+    p.print_x_report().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_open_drawer(app: tauri::AppHandle) -> Result<(), String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
+    p.open_cash_drawer().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_reprint_last(app: tauri::AppHandle) -> Result<ReceiptResponse, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
+    p.reprint_last_receipt().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn fiscal_print_periodic_memory(
+    app: tauri::AppHandle,
+    date_from: String,
+    date_to: String,
+) -> Result<ReceiptResponse, String> {
+    let cfg = load_runtime_config(&app);
+    let provider_name = runtime_config::effective_provider(&cfg);
+    let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
+    p.print_periodic_memory(&date_from, &date_to)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn fiscal_print_z_report(
     app: tauri::AppHandle,
     confirm_token: String,

@@ -272,6 +272,30 @@ fn run_job(kind: &str, payload: Value, cfg: &WsClientConfig) -> Result<Value, Fi
             let r: ReceiptResponse = provider.print_z_report(confirm_token)?;
             Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
         }
+        "open_drawer" => {
+            provider.open_cash_drawer()?;
+            Ok(json!({"ok": true}))
+        }
+        "reprint_last" => {
+            let r: ReceiptResponse = provider.reprint_last_receipt()?;
+            Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
+        }
+        "periodic_memory" => {
+            let date_from = payload
+                .get("date_from")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FiscalError::InvalidCommand {
+                    detail: "periodic_memory: missing date_from".into(),
+                })?;
+            let date_to = payload
+                .get("date_to")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FiscalError::InvalidCommand {
+                    detail: "periodic_memory: missing date_to".into(),
+                })?;
+            let r: ReceiptResponse = provider.print_periodic_memory(date_from, date_to)?;
+            Ok(serde_json::to_value(&r).unwrap_or(Value::Null))
+        }
         other => Err(FiscalError::InvalidCommand {
             detail: format!("unknown job kind: {other}"),
         }),

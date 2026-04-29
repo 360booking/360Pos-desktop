@@ -199,12 +199,79 @@ export class RustFiscalAdapter implements FiscalDeviceAdapter {
   }
 
   async printXReport(): Promise<FiscalReportResponse> {
-    return {
-      status: 'failed',
-      rawTrace: 'X-report not yet wired in Rust provider',
-      errorCode: 'NOT_IMPLEMENTED',
-      errorMessage: 'X-report vine după ce Datecs transport e pornit.',
-    };
+    try {
+      const r = await invoke<RustReceiptResponse>('fiscal_print_x_report');
+      return {
+        status: r.status,
+        rawTrace: r.raw_trace,
+        errorCode: r.error_code ?? undefined,
+        errorMessage: r.error_message ?? undefined,
+      };
+    } catch (e) {
+      return {
+        status: 'failed',
+        rawTrace: String(e),
+        errorCode: 'X_REPORT_FAILED',
+        errorMessage: String(e),
+      };
+    }
+  }
+
+  /** Pop the cash drawer pulse. Returns ok true/false; failure detail is
+   *  in the error string. UI surfaces it as a toast. */
+  async openDrawer(): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await invoke<void>('fiscal_open_drawer');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  /** Reprint the last fiscal receipt as a labelled DUPLICATE. */
+  async reprintLast(): Promise<FiscalReportResponse> {
+    try {
+      const r = await invoke<RustReceiptResponse>('fiscal_reprint_last');
+      return {
+        status: r.status,
+        rawTrace: r.raw_trace,
+        errorCode: r.error_code ?? undefined,
+        errorMessage: r.error_message ?? undefined,
+      };
+    } catch (e) {
+      return {
+        status: 'failed',
+        rawTrace: String(e),
+        errorCode: 'REPRINT_FAILED',
+        errorMessage: String(e),
+      };
+    }
+  }
+
+  /** Print periodic memory between two dates (DDMMYY format expected). */
+  async printPeriodicMemory(
+    dateFrom: string,
+    dateTo: string,
+  ): Promise<FiscalReportResponse> {
+    try {
+      const r = await invoke<RustReceiptResponse>('fiscal_print_periodic_memory', {
+        dateFrom,
+        dateTo,
+      });
+      return {
+        status: r.status,
+        rawTrace: r.raw_trace,
+        errorCode: r.error_code ?? undefined,
+        errorMessage: r.error_message ?? undefined,
+      };
+    } catch (e) {
+      return {
+        status: 'failed',
+        rawTrace: String(e),
+        errorCode: 'PERIODIC_MEMORY_FAILED',
+        errorMessage: String(e),
+      };
+    }
   }
 }
 

@@ -102,4 +102,36 @@ impl FiscalPrinterProvider for SimulatorProvider {
             error_message: None,
         })
     }
+
+    fn open_cash_drawer(&self) -> Result<(), FiscalError> {
+        Ok(())
+    }
+
+    fn reprint_last_receipt(&self) -> Result<ReceiptResponse, FiscalError> {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: Some(format!("SIM-DUP-{n:06}")),
+            fiscal_date: None,
+            raw_trace: "SIM reprint_last".into(),
+            error_code: None,
+            error_message: None,
+        })
+    }
+
+    fn print_periodic_memory(
+        &self,
+        date_from: &str,
+        date_to: &str,
+    ) -> Result<ReceiptResponse, FiscalError> {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: Some(format!("SIM-PER-{n:06}")),
+            fiscal_date: None,
+            raw_trace: format!("SIM periodic_memory {date_from}..{date_to}"),
+            error_code: None,
+            error_message: None,
+        })
+    }
 }
