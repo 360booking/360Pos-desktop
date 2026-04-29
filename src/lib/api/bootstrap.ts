@@ -21,6 +21,9 @@ export interface BootstrapProduct {
   priceCents: number;
   categoryId: string | null;
   isActive: boolean;
+  // Optional so older test fixtures + older backends without the
+  // imageUrl field still type-check; absent = no image.
+  imageUrl?: string | null;
 }
 
 export interface BootstrapCategory {

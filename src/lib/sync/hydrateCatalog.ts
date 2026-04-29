@@ -52,14 +52,15 @@ export async function hydrateCatalog(
     const incomingIds = new Set(bootstrap.products.map((p) => p.id));
     for (const p of bootstrap.products) {
       await tx.execute(
-        `INSERT INTO products (id, sku, name, price_cents, vat_group, category_id, is_active, metadata_json, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)
+        `INSERT INTO products (id, sku, name, price_cents, vat_group, category_id, is_active, image_url, metadata_json, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?)
          ON CONFLICT(id) DO UPDATE SET
            sku = excluded.sku,
            name = excluded.name,
            price_cents = excluded.price_cents,
            category_id = excluded.category_id,
            is_active = excluded.is_active,
+           image_url = excluded.image_url,
            updated_at = excluded.updated_at`,
         [
           p.id,
@@ -68,6 +69,7 @@ export async function hydrateCatalog(
           p.priceCents,
           p.categoryId,
           p.isActive ? 1 : 0,
+          p.imageUrl ?? null,
           hydratedAt,
         ],
       );

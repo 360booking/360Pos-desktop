@@ -354,14 +354,7 @@ const STATUS_PILL: Record<TableSlotStatus, { label: string; className: string }>
   partial: { label: 'Plată parțială', className: 'text-amber-300' },
   paid: { label: 'Plătită', className: 'text-emerald-300' },
 };
-const STATUS_DOT: Record<TableSlotStatus, string> = {
-  empty: 'bg-emerald-400',
-  open: 'bg-violet-400',
-  unsent: 'bg-amber-300',
-  sent: 'bg-emerald-400',
-  partial: 'bg-amber-300',
-  paid: 'bg-slate-400',
-};
+// STATUS_DOT replaced by the larger top-left status badge.
 
 function statusForRemote(
   o: RemoteOrderRow,
@@ -546,39 +539,58 @@ interface TableButtonProps {
 
 function TableButton({ t, status, totalCents, openedAtIso, isForeign, onPick }: TableButtonProps) {
   const pill = STATUS_PILL[status];
+  const isFree = status === 'empty';
+  // Free vs occupied is the most important signal — make it dominate
+  // the card via colour + a big top-left badge that you can read from
+  // a meter away across the room.
+  const cardClasses = isFree
+    ? 'border-emerald-400/60 bg-gradient-to-br from-emerald-500/15 to-emerald-700/10 hover:from-emerald-500/25 hover:to-emerald-700/15 hover:border-emerald-300/80'
+    : status === 'paid'
+      ? 'border-slate-400/40 bg-gradient-to-br from-slate-500/15 to-slate-700/10 hover:border-slate-300/60'
+      : 'border-amber-400/60 bg-gradient-to-br from-amber-500/20 to-orange-600/15 hover:from-amber-500/30 hover:to-orange-600/20';
+  const badgeClasses = isFree
+    ? 'bg-emerald-500/90 text-white'
+    : status === 'paid'
+      ? 'bg-slate-500/90 text-white'
+      : 'bg-amber-500/90 text-amber-950';
+  const badgeLabel = isFree ? 'Liberă' : 'Ocupată';
   return (
     <button
       type="button"
       onClick={onPick}
-      className={`touch-target relative aspect-[4/3] rounded-xl border bg-white/[0.04] backdrop-blur-sm hover:border-violet-400/60 hover:bg-white/[0.08] transition-all flex flex-col items-center justify-center text-center ${
-        status === 'unsent' || status === 'partial'
-          ? 'border-amber-400/40'
-          : status === 'sent'
-            ? 'border-emerald-400/40'
-            : 'border-white/10'
-      }`}
+      className={`touch-target relative aspect-[4/3] rounded-xl border-2 backdrop-blur-sm transition-all flex flex-col items-center justify-center text-center ${cardClasses}`}
       title={
         isForeign
           ? 'Comandă deschisă pe alt dispozitiv — read-only până la deschiderea aici.'
           : undefined
       }
     >
-      <span className={`absolute top-2 right-2 h-2 w-2 rounded-full ${STATUS_DOT[status]}`} />
-      {isForeign && (
-        <Lock className="absolute top-2 left-2 h-3 w-3 text-slate-400" />
-      )}
-      <span className="text-lg font-bold text-white leading-none">{t.table_number}</span>
+      <span
+        className={`absolute top-1.5 left-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider backdrop-blur-sm ${badgeClasses}`}
+      >
+        {badgeLabel}
+      </span>
       {t.capacity != null && (
-        <span className="text-[10px] text-slate-400 mt-1">{t.capacity} loc.</span>
+        <span className="absolute top-1.5 right-1.5 inline-flex items-center gap-1 rounded-md bg-slate-950/60 px-1.5 py-0.5 text-[9px] font-semibold text-slate-200 backdrop-blur-sm">
+          {t.capacity} loc.
+        </span>
       )}
-      <span className={`text-[10px] mt-1 ${pill.className}`}>{pill.label}</span>
+      {isForeign && (
+        <Lock className="absolute bottom-1.5 right-1.5 h-3 w-3 text-slate-400" />
+      )}
+      <span className="text-2xl font-extrabold text-white leading-none mt-2 drop-shadow">
+        {t.table_number}
+      </span>
+      {!isFree && (
+        <span className={`text-[10px] mt-1 font-semibold ${pill.className}`}>{pill.label}</span>
+      )}
       {totalCents != null && totalCents > 0 && (
-        <span className="text-[10px] mt-0.5 font-semibold text-violet-200 tabular-nums">
+        <span className="text-[11px] mt-1 font-bold text-white tabular-nums drop-shadow">
           {formatMoney(totalCents)}
         </span>
       )}
       {openedAtIso && (
-        <span className="text-[9px] mt-0.5 text-slate-500 tabular-nums">
+        <span className="text-[10px] mt-0.5 text-amber-100 tabular-nums">
           {formatElapsed(openedAtIso)}
         </span>
       )}
@@ -648,20 +660,47 @@ function MenuPane({ onPickProduct }: { onPickProduct: (p: ProductRow) => void })
 }
 
 function ProductCard({ p, onPick }: { p: ProductRow; onPick: () => void }) {
+  // Cached image URLs come from the backend in three shapes:
+  // absolute https://, root-relative "/uploads/...", or bare
+  // "uploads/...". Coerce so <img> always resolves.
+  const raw = p.image_url ?? '';
+  const imgSrc = raw
+    ? (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/'))
+      ? raw
+      : `/${raw}`
+    : '';
   return (
     <button
       type="button"
       onClick={onPick}
-      className="touch-target group relative text-left p-4 bg-white/[0.04] backdrop-blur-sm rounded-2xl border border-white/10 hover:border-violet-400/60 hover:bg-white/[0.08] hover:shadow-xl hover:shadow-violet-900/30 hover:-translate-y-0.5 transition-all duration-200 min-h-[140px] flex flex-col"
+      className="touch-target group relative text-left bg-white/[0.04] backdrop-blur-sm rounded-2xl border border-white/10 overflow-hidden hover:border-violet-400/60 hover:shadow-xl hover:shadow-violet-900/30 hover:-translate-y-0.5 transition-all duration-200 flex flex-col"
     >
-      <div className="absolute top-3 right-3 h-8 w-8 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-        <Plus className="h-4 w-4" />
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-900">
+        {imgSrc ? (
+          <img
+            src={imgSrc}
+            alt={p.name}
+            loading="lazy"
+            className="h-full w-full object-cover transition group-hover:scale-105"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
+            }}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-slate-600">
+            <Utensils className="h-10 w-10" />
+          </div>
+        )}
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/30 to-transparent" />
+        <div className="absolute right-2 top-2 h-7 w-7 rounded-full bg-violet-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-lg">
+          <Plus className="h-3.5 w-3.5" />
+        </div>
       </div>
-      <div className="font-semibold text-white text-base leading-snug mb-2 line-clamp-2 pr-10">
-        {p.name}
-      </div>
-      <div className="mt-auto flex items-end justify-between">
-        <div className="text-xl font-bold bg-gradient-to-r from-violet-300 to-indigo-300 bg-clip-text text-transparent">
+      <div className="flex flex-col p-3 gap-1">
+        <div className="font-semibold text-white text-sm leading-snug line-clamp-2 min-h-[2.5rem]">
+          {p.name}
+        </div>
+        <div className="text-lg font-bold bg-gradient-to-r from-violet-300 to-indigo-300 bg-clip-text text-transparent">
           {(p.price_cents / 100).toFixed(2)}
           <span className="text-xs font-medium text-slate-400 ml-1">RON</span>
         </div>

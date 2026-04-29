@@ -21,6 +21,7 @@ export interface ProductRow {
   price_cents: number;
   category_id: string | null;
   is_active: number;
+  image_url: string | null;
 }
 
 export interface TableRow {
@@ -52,7 +53,7 @@ export async function readCatalog(exec: SqlExecutor): Promise<CatalogSnapshot> {
       `SELECT id, name, sort_order, station FROM categories ORDER BY sort_order ASC, name ASC`,
     ),
     exec.select<ProductRow>(
-      `SELECT id, sku, name, price_cents, category_id, is_active
+      `SELECT id, sku, name, price_cents, category_id, is_active, image_url
          FROM products
         WHERE is_active = 1
         ORDER BY name ASC`,
