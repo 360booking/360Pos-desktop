@@ -30,6 +30,7 @@ import { startBootstrapScheduler, type BootstrapScheduler } from './bootstrapSch
 import { runBootstrap, type RunBootstrapResult } from './runBootstrap';
 import { startPullScheduler, type PullScheduler } from './pullScheduler';
 import { runPull, type RunPullResult } from './runPull';
+import { resetRemoteCache } from './resetRemoteCache';
 import { startHeartbeatScheduler, type HeartbeatScheduler } from './heartbeatScheduler';
 import { rememberBootstrap } from './lastBootstrap';
 import type { SqlExecutor } from '@/lib/db/executor';
@@ -191,6 +192,23 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
   // produced "cannot commit - no transaction is active".
   attachExecutorForLogs(exec);
   await loadDebugFlag();
+
+  // STEP 1.5: drop the /sync/pull read-model + cursor so the next
+  // pull rehydrates from scratch with only `is_open=true` orders.
+  // Without this, an order that closed in a window where the desktop
+  // was offline (so its post-close `updated_at` never crossed the
+  // persisted cursor) stays cached as `is_open=1` forever — the
+  // operator sees "Masă deschisă" while the server (and the web POS)
+  // shows the table free, and clicking the table fetches the closed
+  // order and bounces with "Comandă închisă".
+  //
+  // Outbox / events are NOT touched: pending offline mutations that
+  // haven't reached the server must survive a re-login. Catalog
+  // tables are also untouched (hydrateCatalog already handled them
+  // in STEP 1).
+  if (cfg.syncTransportMode === 'http') {
+    await resetRemoteCache(exec);
+  }
 
   // STEP 2: now safe to start the periodic workers.
   const stopWorker = worker.start(2_000);
