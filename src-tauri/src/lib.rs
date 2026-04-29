@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod escpos;
 mod fiscal;
 
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
@@ -165,6 +166,7 @@ pub fn run() {
             fiscal::commands::fiscal_get_station_pairing,
             fiscal::commands::fiscal_upsert_station_pairing,
             fiscal::commands::fiscal_clear_station_pairing,
+            escpos::escpos_send,
         ])
         .run(tauri::generate_context!())
         .expect("error while running 360booking POS");

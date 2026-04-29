@@ -67,6 +67,26 @@ export function PosShell() {
     if (e) void useRecovery.getState().refresh(e.exec);
   }, []);
 
+  // Mirror printer config locally so the offline kitchen-print fallback
+  // has fresh data even when the network drops mid-shift. Best-effort —
+  // a failure here only means we'll keep the previously-cached config.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { kitchenPrintersApi } = await import('@/lib/api/kitchenPrinters');
+        const { writePrintersCache } = await import('@/lib/print/cache');
+        const list = await kitchenPrintersApi.list();
+        if (!cancelled) await writePrintersCache(list);
+      } catch {
+        /* offline / 401 / 403 — keep stale cache */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Sprint 11.8 — auto-refresh the cart when the pull cycle brings
   // updated state for the currently-active order (e.g. KDS marked it
   // "ready", waiter on another device added a line). Mirrors browser

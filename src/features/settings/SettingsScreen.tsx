@@ -50,6 +50,7 @@ import {
 } from '@/lib/diagnostics/shipper';
 import { snapshot as snapshot11_5 } from '@/lib/diagnostics';
 import { FiscalSetupWizard } from './FiscalSetupWizard';
+import { KitchenPrintersTab } from './KitchenPrintersTab';
 import { getRecentLogEntries, subscribeLogs, clearLogEntries, isVerboseLogging, setVerboseLogging } from '@/lib/logger';
 
 type TabKey = 'cont' | 'fiscal' | 'printer' | 'btpos' | 'diagnostic';
@@ -64,7 +65,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { key: 'cont', label: 'Cont & Sincronizare', icon: UserIcon, ready: true },
   { key: 'fiscal', label: 'Casă de marcat', icon: Receipt, ready: true },
-  { key: 'printer', label: 'Imprimante', icon: Printer, ready: false },
+  { key: 'printer', label: 'Imprimante', icon: Printer, ready: true },
   { key: 'btpos', label: 'BT POS terminal', icon: Terminal, ready: false },
   { key: 'diagnostic', label: 'Diagnostic', icon: SettingsIcon, ready: true },
 ];
@@ -126,7 +127,7 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <main className="flex-1 overflow-y-auto p-6">
           {tab === 'cont' && <ContSyncTab />}
           {tab === 'fiscal' && <FiscalSetupWizard />}
-          {tab === 'printer' && <ComingSoonTab title="Imprimante" hint="Imprimantă chitanțe + ticket bucătărie + autoprint la Trimite/plată. Vine în Val 2." />}
+          {tab === 'printer' && <KitchenPrintersTab />}
           {tab === 'btpos' && <ComingSoonTab title="BT POS terminal" hint="Configurare ECR + IP terminal. Așteaptă activarea ECR la BT pentru testare reală. Vine în Val 2." />}
           {tab === 'diagnostic' && <DiagnosticTab />}
         </main>

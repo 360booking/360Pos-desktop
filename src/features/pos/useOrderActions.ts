@@ -35,6 +35,7 @@ import { loadOrderFromRemote } from '@/lib/sync/resumeOrder';
 import { getSyncEngine } from '@/lib/sync/bootstrap';
 import { restaurantOrdersApi, openTableViaRest, RestaurantOrderApiError } from '@/lib/api/restaurantOrders';
 import { restaurantOrderToOrder } from '@/lib/api/restaurantOrderMapper';
+import { printKitchenTicketLocal } from '@/lib/print/dispatch';
 import { logger } from '@/lib/logger';
 
 function vatConfigDefault(): TenantVatConfig {
@@ -368,8 +369,50 @@ export function useOrderActions() {
         throw err;
       }
     }
+    // Offline (or no server draft yet) → local event-sourced send. The
+    // backend can't print for us in this branch, so we drive the
+    // kitchen printer directly from the desktop using the cached
+    // tenant-wide config (Sprint 12 offline fallback). Server reconciles
+    // tickets on the next sync and skips re-printing because each
+    // ticket's `printed_at` is stamped server-side only when the
+    // backend itself drives the print.
     const r = await runAction(() => sendToKitchen(order, {}, ctx));
     setOrder(r.next);
+    const localTickets = (r as unknown as { tickets?: Array<{ station: string; payload: { items: Array<{ name: string; quantity: number; modifiers: Record<string, unknown> }> } }> }).tickets;
+    if (localTickets && localTickets.length > 0) {
+      const tableLabel = order.tableId ? String(order.tableId).slice(0, 8) : null;
+      const orderShortId = order.id ? String(order.id).slice(0, 8) : null;
+      for (const t of localTickets) {
+        try {
+          const outcome = await printKitchenTicketLocal(
+            t.station,
+            { tableLabel, orderShortId, printedAt: new Date() },
+            t.payload.items.map((it) => ({
+              quantity: it.quantity,
+              nameSnapshot: it.name,
+            })),
+          );
+          if (outcome.ok) {
+            logger.info('pos.print', 'local kitchen ticket printed', {
+              station: t.station,
+              host: outcome.host,
+              bytes: outcome.bytes,
+            });
+          } else {
+            logger.warn('pos.print', 'local kitchen ticket print failed', {
+              station: t.station,
+              reason: outcome.reason,
+              error: outcome.error,
+            });
+          }
+        } catch (err) {
+          logger.error('pos.print', 'local print threw', {
+            station: t.station,
+            err: String(err),
+          });
+        }
+      }
+    }
   }, [order, setOrder]);
 
   // Sprint 11.9 — mirror browser POS cancelOrder. The pos-core action
