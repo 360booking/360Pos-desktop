@@ -297,6 +297,9 @@ export function PosShell() {
               notes,
             });
           }}
+          onPickPhone={(c) => {
+            void actions.newOrderWithCustomer('phone', c);
+          }}
           onPickDelivery={(c) => {
             void actions.newOrderWithCustomer('home_delivery', c);
           }}

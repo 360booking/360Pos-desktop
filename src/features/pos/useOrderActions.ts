@@ -184,12 +184,15 @@ export function useOrderActions() {
     [setOrder, assertOrderUsable],
   );
 
-  // Walk-in / delivery still goes through the event-sourced path
-  // because the server-side draft-create path for those sources hasn't
-  // been wired yet. Kept verbatim from before; not in the Faza 2 list.
+  // Walk-in / phone / delivery still goes through the event-sourced
+  // path because the server-side draft-create path for those sources
+  // hasn't been wired yet. Kept verbatim from before; not in the Faza 2
+  // list. `phone` covers both pickup-at-restaurant (no address) and
+  // delivery-from-phone-call (address present); the backend reads
+  // `is_delivery` off the address presence.
   const newOrderWithCustomer = useCallback(
     async (
-      source: 'walkin' | 'home_delivery',
+      source: 'walkin' | 'home_delivery' | 'phone',
       customer: {
         customerName?: string;
         customerPhone?: string;

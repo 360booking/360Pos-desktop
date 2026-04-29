@@ -6,10 +6,12 @@
  *
  *   - Masă        → falls through to TablesPane's normal flow
  *                   (we close the sheet without creating).
- *   - Walk-in     → ORDER_CREATED with source='walkin', no tableId,
- *                   no customer fields. Customer name optional.
- *   - Delivery    → opens the delivery sub-form (name/phone/address/notes)
- *                   then ORDER_CREATED with source='home_delivery'.
+ *   - Walk-in     → source='walkin', no tableId, no customer fields.
+ *   - Telefon     → source='phone', name + phone required, address
+ *                   optional. With address ⇒ delivery; without ⇒
+ *                   pickup (client comes to collect at the restaurant).
+ *   - Delivery    → source='home_delivery', name + phone + address
+ *                   required (operator-initiated home delivery).
  *
  * No payment-link, no external delivery providers, no fiscalisation.
  * The created draft order goes through the same outbox + sync as a
@@ -17,7 +19,7 @@
  */
 import { useState } from 'react';
 import { ChairIcon, PersonIcon, TruckIcon } from './_NewOrderIcons';
-import { X } from 'lucide-react';
+import { Phone, X } from 'lucide-react';
 
 interface NewOrderSheetProps {
   onClose: () => void;
@@ -28,15 +30,22 @@ interface NewOrderSheetProps {
     customerAddress: string;
     notes?: string;
   }) => void;
+  onPickPhone: (customer: {
+    customerName: string;
+    customerPhone: string;
+    customerAddress?: string;
+    notes?: string;
+  }) => void;
   onPickTable: () => void;
 }
 
-type Step = 'pick' | 'delivery' | 'walkin';
+type Step = 'pick' | 'delivery' | 'walkin' | 'phone';
 
 export function NewOrderSheet({
   onClose,
   onPickWalkIn,
   onPickDelivery,
+  onPickPhone,
   onPickTable,
 }: NewOrderSheetProps) {
   const [step, setStep] = useState<Step>('pick');
@@ -46,6 +55,12 @@ export function NewOrderSheet({
   const [deliveryPhone, setDeliveryPhone] = useState('');
   const [deliveryAddress, setDeliveryAddress] = useState('');
   const [deliveryNotes, setDeliveryNotes] = useState('');
+  // Phone-order state. Address optional; when empty ⇒ pickup.
+  const [phoneName, setPhoneName] = useState('');
+  const [phonePhone, setPhonePhone] = useState('');
+  const [phoneAddress, setPhoneAddress] = useState('');
+  const [phoneNotes, setPhoneNotes] = useState('');
+  const [phoneIsDelivery, setPhoneIsDelivery] = useState(false);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -54,6 +69,7 @@ export function NewOrderSheet({
           <h3 className="text-base font-semibold text-white">
             {step === 'pick' && 'Comandă nouă'}
             {step === 'walkin' && 'Walk-in'}
+            {step === 'phone' && 'Comandă telefonică'}
             {step === 'delivery' && 'Comandă livrare'}
           </h3>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white">
@@ -77,6 +93,12 @@ export function NewOrderSheet({
               label="Walk-in / la pachet"
               hint="Client în picioare, fără masă"
               onClick={() => setStep('walkin')}
+            />
+            <SourceButton
+              icon={<Phone className="h-5 w-5" />}
+              label="Comandă telefonică"
+              hint="Client a sunat — ridicare la sediu sau livrare"
+              onClick={() => setStep('phone')}
             />
             <SourceButton
               icon={<TruckIcon />}
@@ -136,6 +158,36 @@ export function NewOrderSheet({
           </div>
         )}
 
+        {step === 'phone' && (
+          <PhoneOrderForm
+            name={phoneName}
+            phone={phonePhone}
+            address={phoneAddress}
+            notes={phoneNotes}
+            isDelivery={phoneIsDelivery}
+            onNameChange={setPhoneName}
+            onPhoneChange={setPhonePhone}
+            onAddressChange={setPhoneAddress}
+            onNotesChange={setPhoneNotes}
+            onIsDeliveryChange={(v) => {
+              setPhoneIsDelivery(v);
+              if (!v) setPhoneAddress('');
+            }}
+            onBack={() => setStep('pick')}
+            onSubmit={() => {
+              if (!phoneName.trim() || !phonePhone.trim()) return;
+              if (phoneIsDelivery && !phoneAddress.trim()) return;
+              onPickPhone({
+                customerName: phoneName.trim(),
+                customerPhone: phonePhone.trim(),
+                customerAddress: phoneIsDelivery ? phoneAddress.trim() : undefined,
+                notes: phoneNotes.trim() || undefined,
+              });
+              onClose();
+            }}
+          />
+        )}
+
         {step === 'delivery' && (
           <DeliveryForm
             name={deliveryName}
@@ -161,6 +213,82 @@ export function NewOrderSheet({
             }}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+interface PhoneOrderFormProps {
+  name: string;
+  phone: string;
+  address: string;
+  notes: string;
+  isDelivery: boolean;
+  onNameChange: (v: string) => void;
+  onPhoneChange: (v: string) => void;
+  onAddressChange: (v: string) => void;
+  onNotesChange: (v: string) => void;
+  onIsDeliveryChange: (v: boolean) => void;
+  onBack: () => void;
+  onSubmit: () => void;
+}
+
+function PhoneOrderForm(p: PhoneOrderFormProps) {
+  const isValid =
+    p.name.trim() && p.phone.trim() && (!p.isDelivery || p.address.trim());
+  return (
+    <div className="space-y-3">
+      <Field label="Nume client *" value={p.name} onChange={p.onNameChange} placeholder="ex: Ion Popescu" />
+      <Field label="Telefon *" value={p.phone} onChange={p.onPhoneChange} placeholder="07XX XXX XXX" />
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => p.onIsDeliveryChange(false)}
+          className={`touch-target rounded-xl py-2 text-sm font-semibold border ${
+            !p.isDelivery
+              ? 'bg-violet-600/30 border-violet-400/60 text-white'
+              : 'bg-slate-700/30 border-white/10 text-slate-300'
+          }`}
+        >
+          Ridicare la sediu
+        </button>
+        <button
+          type="button"
+          onClick={() => p.onIsDeliveryChange(true)}
+          className={`touch-target rounded-xl py-2 text-sm font-semibold border ${
+            p.isDelivery
+              ? 'bg-violet-600/30 border-violet-400/60 text-white'
+              : 'bg-slate-700/30 border-white/10 text-slate-300'
+          }`}
+        >
+          Livrare la adresă
+        </button>
+      </div>
+      {p.isDelivery && (
+        <Field
+          label="Adresă livrare *"
+          value={p.address}
+          onChange={p.onAddressChange}
+          placeholder="ex: Str. Avram Iancu 12, ap. 4"
+        />
+      )}
+      <Field label="Notițe" value={p.notes} onChange={p.onNotesChange} placeholder="ex: fără ceapă, sun la sosire" />
+      <div className="flex gap-2 pt-2">
+        <button
+          type="button"
+          onClick={p.onBack}
+          className="touch-target flex-1 rounded-xl py-2.5 text-sm font-semibold bg-slate-700/40 text-slate-200 border border-white/10 hover:bg-slate-700/60"
+        >
+          Înapoi
+        </button>
+        <button
+          type="button"
+          disabled={!isValid}
+          onClick={p.onSubmit}
+          className="touch-target flex-1 rounded-xl py-2.5 text-sm font-semibold bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-900/40 disabled:opacity-50"
+        >
+          {p.isDelivery ? 'Creează (livrare)' : 'Creează (ridicare)'}
+        </button>
       </div>
     </div>
   );
