@@ -207,15 +207,39 @@ export function classifyOrderMutationError(
 }
 
 function wrap(err: unknown): RestaurantOrderApiError {
-  const ax = err as AxiosError<{ detail?: unknown; existing_order_id?: string }>;
+  const ax = err as AxiosError<{ detail?: unknown; existing_order_id?: string; existingOrderId?: string }>;
   const status = ax.response?.status ?? null;
   const data = ax.response?.data ?? null;
   const detail = (data && typeof data === 'object' && 'detail' in data) ? (data as { detail?: unknown }).detail : data;
-  const existing = (data && typeof data === 'object' && 'existing_order_id' in data)
-    ? String((data as { existing_order_id?: string }).existing_order_id ?? '')
-    : null;
-  const msg = typeof detail === 'string' ? detail : ax.message;
-  return new RestaurantOrderApiError(msg, status, detail, existing || null);
+  // Backend's table_has_active_order 409 ships the conflicting order id as
+  // `detail.existingOrderId` (camelCase, nested). Older / other endpoints
+  // ship `existing_order_id` at the root. Accept both shapes — without
+  // this, the desktop falls through to the draft-only fallback list and
+  // misses any sent/ready order on the same table.
+  const candidates: Array<unknown> = [];
+  const pushIf = (obj: unknown, ...keys: string[]) => {
+    if (obj && typeof obj === 'object') {
+      for (const k of keys) {
+        const v = (obj as Record<string, unknown>)[k];
+        if (typeof v === 'string' && v) candidates.push(v);
+      }
+    }
+  };
+  pushIf(data, 'existing_order_id', 'existingOrderId');
+  pushIf(detail, 'existing_order_id', 'existingOrderId');
+  const existing = (candidates[0] as string | undefined) ?? null;
+  // Surface a useful message: prefer the structured detail.message when
+  // present (backend ships {code, message, existingOrderId}) over a raw
+  // JSON-stringified detail object that would render as "[object Object]".
+  let msg: string;
+  if (typeof detail === 'string') {
+    msg = detail;
+  } else if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
+    msg = (detail as { message: string }).message;
+  } else {
+    msg = ax.message;
+  }
+  return new RestaurantOrderApiError(msg, status, detail, existing);
 }
 
 export const restaurantOrdersApi = {
@@ -349,9 +373,15 @@ export async function openTableViaRest(tableId: string): Promise<RestaurantOrder
     if (err.existingOrderId) {
       return restaurantOrdersApi.get(err.existingOrderId);
     }
-    // Fallback: scan recent drafts for the same table.
-    const recent = await restaurantOrdersApi.list({ status: 'draft', source: 'pos', limit: 50 });
-    const match = recent.find((o) => o.tableId === tableId);
+    // Fallback: the backend's 409 should always carry existingOrderId,
+    // but tolerate older / partial payloads by scanning OPEN orders on
+    // this table — not just drafts. A waiter on another device may have
+    // already sent the order to the kitchen (status=sent/ready); we
+    // still want to resume it instead of bouncing the table tap.
+    const recent = await restaurantOrdersApi.list({ source: 'pos', limit: 100 });
+    const match = recent.find(
+      (o) => o.tableId === tableId && o.status !== 'cancelled' && o.status !== 'refunded',
+    );
     if (match) return match;
     throw err;
   }

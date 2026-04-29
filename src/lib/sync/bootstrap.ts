@@ -202,13 +202,13 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
   // shows the table free, and clicking the table fetches the closed
   // order and bounces with "Comandă închisă".
   //
-  // Outbox / events are NOT touched: pending offline mutations that
-  // haven't reached the server must survive a re-login. Catalog
-  // tables are also untouched (hydrateCatalog already handled them
-  // in STEP 1).
-  if (cfg.syncTransportMode === 'http') {
-    await resetRemoteCache(exec);
-  }
+  // Run unconditionally — wiping these tables in `memory` mode is a
+  // no-op on a fresh DB and a guaranteed-clean slate on an upgraded
+  // install where SQLite from a prior shift survived. Outbox / events
+  // are NOT touched: pending offline mutations that haven't reached
+  // the server must survive a re-login. Catalog tables are also
+  // untouched (hydrateCatalog already handled them in STEP 1).
+  await resetRemoteCache(exec);
 
   // STEP 2: now safe to start the periodic workers.
   const stopWorker = worker.start(2_000);
