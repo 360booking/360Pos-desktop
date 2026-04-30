@@ -1,10 +1,86 @@
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::Manager;
+use std::sync::Mutex;
+use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod escpos;
 mod fiscal;
+
+/// Holds the spawned fiscal-bridge child process so we can stop it on exit.
+/// Wrapped in Mutex<Option> because we may not always have a child (when
+/// the binary is missing or single_instance lock prevents spawn).
+struct BridgeChild(Mutex<Option<std::process::Child>>);
+
+fn locate_bridge_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let candidates: [PathBuf; 2] = [
+        resource_dir.join("sidecars").join("fiscal-bridge.exe"),
+        resource_dir.join("sidecars").join("fiscal-bridge"),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Spawn the bundled fiscal-bridge as a detached child. The bridge has its
+/// own single_instance lock + WS reconnection loop, so we just kick it off
+/// and let it run. stdout/stderr go to the bridge's own log file at
+/// %LocalAppData%\360booking-bridge\bridge.log — keeping POS Desktop's
+/// log focused on UI events.
+fn spawn_fiscal_bridge(app: &tauri::AppHandle) {
+    let bin = match locate_bridge_binary(app) {
+        Some(p) => p,
+        None => {
+            log::info!("fiscal-bridge sidecar not present in resource dir");
+            return;
+        }
+    };
+
+    let mut cmd = std::process::Command::new(&bin);
+    // Hide the console window on Windows so the user doesn't see a flash.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    match cmd.spawn() {
+        Ok(child) => {
+            log::info!(
+                "fiscal-bridge spawned (pid={}) from {}",
+                child.id(),
+                bin.display()
+            );
+            if let Some(state) = app.try_state::<BridgeChild>() {
+                if let Ok(mut guard) = state.0.lock() {
+                    *guard = Some(child);
+                }
+            }
+        }
+        Err(err) => {
+            log::warn!("failed to spawn fiscal-bridge {}: {err}", bin.display());
+        }
+    }
+}
+
+fn stop_fiscal_bridge(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<BridgeChild>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(mut child) = guard.take() {
+                match child.kill() {
+                    Ok(()) => {
+                        let _ = child.wait();
+                        log::info!("fiscal-bridge stopped");
+                    }
+                    Err(err) => log::warn!("failed to stop fiscal-bridge: {err}"),
+                }
+            }
+        }
+    }
+}
 
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
 const MIGRATION_V2_EVENTS_ORDER_LINK: &str =
@@ -153,6 +229,15 @@ pub fn run() {
                 .add_migrations("sqlite:pos-desktop.db", migrations)
                 .build(),
         )
+        .manage(BridgeChild(Mutex::new(None)))
+        .setup(|app| {
+            // Auto-launch the bundled fiscal-bridge sidecar so cashiers don't
+            // have to install/start it separately. The bridge's single_instance
+            // lock makes this a no-op if a service-installed copy is already
+            // running on the box.
+            spawn_fiscal_bridge(&app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             fiscal_bridge_status,
             app_data_dir,
@@ -188,6 +273,15 @@ pub fn run() {
             fiscal::commands::fiscal_clear_station_pairing,
             escpos::escpos_send,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running 360booking POS");
+        .build(tauri::generate_context!())
+        .expect("error while building 360booking POS")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { .. } => {
+                stop_fiscal_bridge(app);
+            }
+            RunEvent::WindowEvent { event: WindowEvent::Destroyed, .. } => {
+                stop_fiscal_bridge(app);
+            }
+            _ => {}
+        });
 }

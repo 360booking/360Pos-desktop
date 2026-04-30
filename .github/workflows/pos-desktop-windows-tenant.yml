@@ -137,6 +137,18 @@ jobs:
         shell: pwsh
         run: npx vite build
 
+      - name: Download fiscal-bridge sidecar
+        shell: pwsh
+        env:
+          BRIDGE_TAG: v0.3.20
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/sidecars | Out-Null
+          $url = "https://github.com/360booking/fiscal-bridge/releases/download/$env:BRIDGE_TAG/360booking-bridge-setup.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile src-tauri/sidecars/fiscal-bridge.exe -MaximumRetryCount 3 -RetryIntervalSec 5
+          $info = Get-Item src-tauri/sidecars/fiscal-bridge.exe
+          Write-Host "Bundled fiscal-bridge.exe ($([math]::Round($info.Length/1MB, 1)) MB) — pinned to $env:BRIDGE_TAG"
+
       - name: Tauri build (MSI + NSIS, tenant profile)
         shell: pwsh
         run: npx @tauri-apps/cli build

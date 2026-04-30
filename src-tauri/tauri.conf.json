@@ -37,6 +37,7 @@
       "icons/128x128.png",
       "icons/icon.ico"
     ],
+    "resources": ["sidecars/*"],
     "publisher": "360booking",
     "category": "Business",
     "shortDescription": "360booking POS — Windows",
