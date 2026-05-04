@@ -70,7 +70,12 @@ export function getApiClient(): AxiosInstance {
   if (_client) return _client;
   _client = axios.create({
     baseURL: getConfig().backendUrl,
-    timeout: 5_000,
+    // 15s default — 5s was too aggressive for real-world POS networks
+    // (residential wifi to Hetzner). Backend itself answers in <50ms on
+    // the polling endpoints, but transient jitter would routinely take
+    // requests past 5s and break sync/alerts/health in batches. Heavier
+    // calls (fiscal Z, periodic-memory, storno) override per-request.
+    timeout: 15_000,
     headers: { 'X-Pos-Client': 'pos-desktop' },
   });
 
@@ -200,7 +205,7 @@ export async function health(): Promise<HealthResponse> {
   }
   try {
     const r = await getApiClient().get('/api/pos/health', {
-      timeout: 5_000,
+      timeout: 8_000,
       skipAuth: true,
     });
     const latencyMs = Math.round(performance.now() - t0);
