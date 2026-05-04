@@ -230,6 +230,20 @@ where
 }
 
 fn run_job(kind: &str, payload: Value, cfg: &WsClientConfig) -> Result<Value, FiscalError> {
+    // Tenant-side test_mode override: when the backend marks the tenant
+    // as still in dev/UAT (pos_config_json.fiscal.test_mode=true), every
+    // command short-circuits with a synthetic ReceiptResponse and never
+    // touches COM. Lets the operator exercise Z/X/storno without the
+    // real printer rejecting (e.g. operator/password not yet set, fiscal
+    // memory not initialised). Backend stamps `test_mode:true` into the
+    // job payload — see bridge_agent.py::_wrap_payload.
+    let test_mode = payload
+        .get("test_mode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if test_mode {
+        return run_job_simulated(kind, &payload);
+    }
     let runtime_cfg: RuntimeConfig = cfg
         .db_path
         .as_deref()
@@ -298,6 +312,41 @@ fn run_job(kind: &str, payload: Value, cfg: &WsClientConfig) -> Result<Value, Fi
         }
         other => Err(FiscalError::InvalidCommand {
             detail: format!("unknown job kind: {other}"),
+        }),
+    }
+}
+
+/// Synthesize a successful response without touching the printer. Mirrors
+/// the shape the real provider returns so the backend's BridgeAgentDriver
+/// can deserialize without special-casing test mode. The fake fiscal
+/// number carries a TEST- prefix so an operator skimming `fiscal_receipts`
+/// can spot test rows immediately.
+fn run_job_simulated(kind: &str, payload: &Value) -> Result<Value, FiscalError> {
+    use crate::fiscal::dto::{ReceiptResponse, ReceiptStatus};
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let fake_bf = format!("TEST-{secs}");
+    let now = format!("@unix:{secs}");
+    match kind {
+        "test_print" => Ok(serde_json::json!({"ok": true, "detail": "test_mode — no COM I/O"})),
+        "open_drawer" => Ok(serde_json::json!({"ok": true})),
+        "print_receipt" | "x_report" | "z_report" | "reprint_last" | "cancel_receipt"
+        | "periodic_memory" => {
+            let trace = format!("test_mode {kind} payload={}", payload);
+            let resp = ReceiptResponse {
+                status: ReceiptStatus::Printed,
+                fiscal_number: Some(fake_bf),
+                fiscal_date: Some(now),
+                raw_trace: trace,
+                error_code: None,
+                error_message: None,
+            };
+            Ok(serde_json::to_value(&resp).unwrap_or(Value::Null))
+        }
+        other => Err(FiscalError::InvalidCommand {
+            detail: format!("unknown job kind (test_mode): {other}"),
         }),
     }
 }
