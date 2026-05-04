@@ -12,8 +12,16 @@ vi.mock('@/lib/api/diagnostics', () => ({
   postDiagnosticsDump: vi.fn(async (body: { logs: unknown[] }) => ({ accepted: body.logs.length })),
 }));
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
+  // Sprint 11.10 — exportLogsAsText / flushNow / readPendingDumpCount
+  // now merge the debugLog ring buffer with logger._entries so the user
+  // gets the warn/info lines that were previously stranded in the
+  // separate logger ring. Reset both buffers between tests.
+  const debugLog = await import('@/lib/debugLog');
+  debugLog.clearRingBuffer();
+  const logger = await import('@/lib/logger');
+  logger.clearLogEntries();
 });
 
 afterEach(() => {
@@ -31,7 +39,12 @@ describe('shipper (Sprint 11.5 RAM-only)', () => {
 
   it('flushNow ships ring buffer entries and clears it', async () => {
     const debugLog = await import('@/lib/debugLog');
+    const logger = await import('@/lib/logger');
     await debugLog.setDebugEnabled(true);
+    // setDebugEnabled may swallow an initDb failure into logger.warn
+    // in the test sandbox; reset the logger ring after setup so we
+    // count only the test inputs below.
+    logger.clearLogEntries();
     debugLog.dbg('test', 'a');
     debugLog.dbg('test', 'b');
     debugLog.dbg('test', 'c');
@@ -46,7 +59,9 @@ describe('shipper (Sprint 11.5 RAM-only)', () => {
 
   it('readPendingDumpCount mirrors ring buffer size', async () => {
     const debugLog = await import('@/lib/debugLog');
+    const logger = await import('@/lib/logger');
     await debugLog.setDebugEnabled(true);
+    logger.clearLogEntries();
     debugLog.dbg('test', 'x');
     debugLog.dbg('test', 'y');
     const { readPendingDumpCount } = await import('../shipper');
@@ -68,7 +83,9 @@ describe('shipper (Sprint 11.5 RAM-only)', () => {
 
   it('exportLogsAsText produces a paste-friendly multiline string', async () => {
     const debugLog = await import('@/lib/debugLog');
+    const logger = await import('@/lib/logger');
     await debugLog.setDebugEnabled(true);
+    logger.clearLogEntries();
     debugLog.dbg('runAction', 'newOrder', { tableId: 't-1' });
     debugLog.dbgError('persist', 'boom');
     const { exportLogsAsText } = await import('../shipper');
@@ -76,6 +93,23 @@ describe('shipper (Sprint 11.5 RAM-only)', () => {
     expect(text).toContain('runAction: newOrder');
     expect(text).toContain('persist: boom');
     expect(text.split('\n').length).toBe(2);
+  });
+
+  it('exportLogsAsText also includes logger.warn lines (live tail UI)', async () => {
+    // The bug we are fixing: warn / info lines emitted via logger.* (the
+    // ones the user sees in the in-app live tail and that contain timeout
+    // / sqlite-locked diagnostics) used to be invisible to Copy / Export.
+    const debugLog = await import('@/lib/debugLog');
+    const logger = await import('@/lib/logger');
+    await debugLog.setDebugEnabled(true);
+    logger.clearLogEntries();
+    logger.logger.warn('http', 'health probe failed', { url: '/api/pos/health' });
+    debugLog.dbg('runAction', 'addItem');
+    const { exportLogsAsText, readPendingDumpCount } = await import('../shipper');
+    const text = exportLogsAsText();
+    expect(text).toContain('http: health probe failed');
+    expect(text).toContain('runAction: addItem');
+    expect(readPendingDumpCount()).toBe(2);
   });
 
   it('startShipper / stopShipper are no-ops in 11.5 (no auto-ship)', async () => {
