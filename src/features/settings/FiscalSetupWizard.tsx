@@ -249,10 +249,21 @@ export function FiscalSetupWizard() {
       }
       setAutoStartTried(true);
     })();
-    // Polling at 30s — kept gentle so the rest of the UI doesn't slow
-    // down. Manual "Refresh status" button on step 2 covers tighter loops
-    // when the operator is actively claiming.
-    const id = setInterval(() => void refreshBridgeState(), 30_000);
+    // Tight poll for the first 30s after mount so the operator sees the
+    // bridge flip to "conectat" without having to click Refresh — the WS
+    // handshake usually completes in ~3-5s after auto-restart, but the
+    // previous 30s interval meant they could open Settings just before
+    // that and stare at "neconectat" for half a minute. After 30s we drop
+    // back to 30s so the rest of the UI stays cheap.
+    let elapsed = 0;
+    let id: ReturnType<typeof setInterval> = setInterval(() => {
+      void refreshBridgeState();
+      elapsed += 2_000;
+      if (elapsed >= 30_000) {
+        clearInterval(id);
+        id = setInterval(() => void refreshBridgeState(), 30_000);
+      }
+    }, 2_000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
