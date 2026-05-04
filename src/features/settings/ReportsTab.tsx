@@ -63,7 +63,11 @@ export function ReportsTab() {
 
   const onXReport = () =>
     run('x', 'X-report', async () => {
-      const r = await getApiClient().post<ReportResp>('/api/fiscal/x-report', {});
+      const r = await getApiClient().post<ReportResp>(
+        '/api/fiscal/x-report',
+        {},
+        { timeout: 35_000 },
+      );
       return { ok: r.data.ok, message: r.data.message };
     });
 
@@ -77,20 +81,32 @@ export function ReportsTab() {
       return;
     if (!confirm('Confirmare finală: emit Z-report acum?')) return;
     return run('z', 'Z-report', async () => {
-      const r = await getApiClient().post<ReportResp>('/api/fiscal/z-report', {});
+      const r = await getApiClient().post<ReportResp>(
+        '/api/fiscal/z-report',
+        {},
+        { timeout: 65_000 },
+      );
       return { ok: r.data.ok, message: r.data.message };
     });
   };
 
   const onReprint = () =>
     run('reprint', 'Bon duplicat', async () => {
-      const r = await getApiClient().post<ReportResp>('/api/fiscal/reprint-last', {});
+      const r = await getApiClient().post<ReportResp>(
+        '/api/fiscal/reprint-last',
+        {},
+        { timeout: 35_000 },
+      );
       return { ok: r.data.ok, message: r.data.message };
     });
 
   const onDrawer = () =>
     run('drawer', 'Sertar', async () => {
-      const r = await getApiClient().post<ReportResp>('/api/fiscal/open-drawer', {});
+      const r = await getApiClient().post<ReportResp>(
+        '/api/fiscal/open-drawer',
+        {},
+        { timeout: 20_000 },
+      );
       return { ok: r.data.ok, message: r.data.message };
     });
 
@@ -131,10 +147,14 @@ export function ReportsTab() {
     const dateTo = prompt('Data sfârșit (YYYY-MM-DD):');
     if (!dateTo || !dateTo.trim()) return;
     return run('periodic', 'Raport periodic memorie', async () => {
-      const r = await getApiClient().post<ReportResp>('/api/fiscal/periodic-memory', {
-        date_from: dateFrom.trim(),
-        date_to: dateTo.trim(),
-      });
+      const r = await getApiClient().post<ReportResp>(
+        '/api/fiscal/periodic-memory',
+        {
+          date_from: dateFrom.trim(),
+          date_to: dateTo.trim(),
+        },
+        { timeout: 130_000 },
+      );
       return { ok: r.data.ok, message: r.data.message };
     });
   };
