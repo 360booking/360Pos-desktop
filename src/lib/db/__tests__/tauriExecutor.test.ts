@@ -138,9 +138,10 @@ describe('tauriExecutor — retry on database is locked', () => {
     };
     const exec = tauriExecutor(db as never);
     await expect(exec.execute('UPDATE x SET v=1')).rejects.toThrow(/locked/);
-    // 1 initial + 3 retries = 4 calls.
-    expect((db.execute as ReturnType<typeof vi.fn>).mock.calls.length).toBe(4);
-  });
+    // 1 initial + 5 retries = 6 calls (retry budget bumped to cover
+    // multi-second hydrate batches).
+    expect((db.execute as ReturnType<typeof vi.fn>).mock.calls.length).toBe(6);
+  }, 15_000);
 
   it('non-locked errors are NOT retried', async () => {
     const db = {

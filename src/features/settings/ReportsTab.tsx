@@ -66,7 +66,7 @@ export function ReportsTab() {
       const r = await getApiClient().post<ReportResp>(
         '/api/fiscal/x-report',
         {},
-        { timeout: 35_000 },
+        { timeout: 35_000, skipAuthRefresh: true },
       );
       return { ok: r.data.ok, message: r.data.message };
     });
@@ -84,7 +84,7 @@ export function ReportsTab() {
       const r = await getApiClient().post<ReportResp>(
         '/api/fiscal/z-report',
         {},
-        { timeout: 65_000 },
+        { timeout: 65_000, skipAuthRefresh: true },
       );
       return { ok: r.data.ok, message: r.data.message };
     });
@@ -95,7 +95,7 @@ export function ReportsTab() {
       const r = await getApiClient().post<ReportResp>(
         '/api/fiscal/reprint-last',
         {},
-        { timeout: 35_000 },
+        { timeout: 35_000, skipAuthRefresh: true },
       );
       return { ok: r.data.ok, message: r.data.message };
     });
@@ -105,7 +105,7 @@ export function ReportsTab() {
       const r = await getApiClient().post<ReportResp>(
         '/api/fiscal/open-drawer',
         {},
-        { timeout: 20_000 },
+        { timeout: 20_000, skipAuthRefresh: true },
       );
       return { ok: r.data.ok, message: r.data.message };
     });
@@ -130,7 +130,7 @@ export function ReportsTab() {
       }>(
         '/api/fiscal/storno-by-bf',
         { bf: bf.trim(), reason: reason.trim() },
-        { timeout: 60_000 }, // serial fiscal storno can take 10-15s
+        { timeout: 60_000, skipAuthRefresh: true }, // serial fiscal storno can take 10-15s
       );
       const stornoNum = r.data.storno_fiscal_number;
       const tail = stornoNum ? ` Bon storno: ${stornoNum}.` : '';
@@ -153,7 +153,7 @@ export function ReportsTab() {
           date_from: dateFrom.trim(),
           date_to: dateTo.trim(),
         },
-        { timeout: 130_000 },
+        { timeout: 130_000, skipAuthRefresh: true },
       );
       return { ok: r.data.ok, message: r.data.message };
     });

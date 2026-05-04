@@ -30,7 +30,13 @@ import type Database from '@tauri-apps/plugin-sql';
 import { logger } from '@/lib/logger';
 import type { SqlExecutor } from './executor';
 
-const RETRY_BACKOFF_MS = [50, 200, 500];
+// Retry budget grew from [50, 200, 500] (≈750ms total) after pilot
+// observed an 11s catalog hydrate batch holding the connection while
+// auth-store.writeKey raced for the same lock and ran out of retries
+// in <1s. With WAL on, a busy mutex of up to ~6s is realistic during
+// hydrate / large pull batches; the retry chain below covers ~6s before
+// surfacing the SQLITE_BUSY to the caller.
+const RETRY_BACKOFF_MS = [100, 300, 800, 1500, 3000];
 
 function isLockedError(err: unknown): boolean {
   const msg = String((err as { message?: unknown })?.message ?? err ?? '');

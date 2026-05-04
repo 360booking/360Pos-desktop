@@ -23,9 +23,21 @@ declare module 'axios' {
   interface AxiosRequestConfig {
     /** Set true on /api/pos/auth/* routes to skip Authorization + refresh logic. */
     skipAuth?: boolean;
+    /**
+     * Skip the *pre-emptive* refresh check on the request interceptor —
+     * the request still attaches the current access token, just doesn't
+     * touch local SQLite (auth-store.applyTokens) before sending. Used
+     * for time-critical operations (fiscal Z/X/storno) where a busy
+     * SQLite mutex would otherwise stall the request behind a hydrate
+     * or pull batch and surface as a 15s axios timeout even though the
+     * backend is fine. The 401 retry path stays active, so an actually
+     * expired token still gets refreshed once.
+     */
+    skipAuthRefresh?: boolean;
   }
   interface InternalAxiosRequestConfig {
     skipAuth?: boolean;
+    skipAuthRefresh?: boolean;
     /** Internal: prevents infinite retry loops in the 401 interceptor. */
     _retried?: boolean;
   }
@@ -83,8 +95,14 @@ export function getApiClient(): AxiosInstance {
     if (!shouldAttachAuth(cfg)) return cfg;
     // Pre-emptively refresh if the access token is within 30s of expiry.
     // Cheap insurance against the very common pattern of triggering a
-    // burst of POS requests at the moment a token rolls over.
-    if (isAccessTokenStale() && useAuthStore.getState().refreshToken) {
+    // burst of POS requests at the moment a token rolls over. SKIPPED
+    // when the caller passes skipAuthRefresh:true — the 401 path still
+    // catches a truly expired token and retries once.
+    if (
+      !cfg.skipAuthRefresh &&
+      isAccessTokenStale() &&
+      useAuthStore.getState().refreshToken
+    ) {
       await performRefreshOnce();
     }
     const token = readAccessToken();
