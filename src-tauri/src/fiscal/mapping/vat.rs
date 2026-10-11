@@ -1,20 +1,39 @@
 // Romanian VAT groups — mirror of fiscal-bridge/bridge/printers/datecs_dp25.py:43-48.
 // Tenant override planned via DatecsConfig.vat_map (see audit §5.1).
+//
+// Since 1 Aug 2025 the Romanian rates are 21% (standard, group A) and 11%
+// (reduced, group B). The pre-2025 rates 19% / 9% stay mapped to the same
+// groups so an old fiscal config (or a backend snapshot from before the
+// switch) still lands on the right register. Before this mapping knew about
+// 11%, a food line at 11% silently fell through to group A (21%).
+
+fn approx(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.0005
+}
+
+/// Accepts a fraction (0.21) or, defensively, a percentage (21.0).
+fn normalise(rate: f64) -> f64 {
+    if rate > 1.0 {
+        rate / 100.0
+    } else {
+        rate
+    }
+}
 
 pub fn rate_to_group(rate: f64) -> char {
-    let r = (rate * 10000.0).round() / 10000.0;
-    if (r - 0.19).abs() < f64::EPSILON {
+    let r = normalise(rate);
+    if approx(r, 0.21) || approx(r, 0.19) {
         'A'
-    } else if (r - 0.09).abs() < f64::EPSILON {
+    } else if approx(r, 0.11) || approx(r, 0.09) {
         'B'
-    } else if (r - 0.05).abs() < f64::EPSILON {
+    } else if approx(r, 0.05) {
         'C'
-    } else if r.abs() < f64::EPSILON {
+    } else if approx(r, 0.0) {
         'D'
     } else {
-        // Unknown rate — log + fall back to A (19%) so the receipt still
-        // prints with the most common Romanian rate. Server is the source
-        // of truth for the rate that ends up on the bon.
+        // Unknown rate — fall back to A (standard rate) so the receipt still
+        // prints. Server is the source of truth for the rate on the bon.
+        log::warn!("vat: unknown rate {rate} — falling back to group A");
         'A'
     }
 }
@@ -32,5 +51,35 @@ pub fn rate_to_dp25x_id(rate: f64) -> u8 {
         'C' => 3,
         'D' => 4,
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_romanian_rates() {
+        assert_eq!(rate_to_dp25x_id(0.21), 1);
+        assert_eq!(rate_to_dp25x_id(0.11), 2);
+        assert_eq!(rate_to_dp25x_id(0.05), 3);
+        assert_eq!(rate_to_dp25x_id(0.0), 4);
+    }
+
+    #[test]
+    fn legacy_rates_keep_their_groups() {
+        assert_eq!(rate_to_group(0.19), 'A');
+        assert_eq!(rate_to_group(0.09), 'B');
+    }
+
+    #[test]
+    fn percentages_are_accepted() {
+        assert_eq!(rate_to_group(21.0), 'A');
+        assert_eq!(rate_to_group(11.0), 'B');
+    }
+
+    #[test]
+    fn unknown_rate_falls_back_to_a() {
+        assert_eq!(rate_to_group(0.42), 'A');
     }
 }

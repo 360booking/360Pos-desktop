@@ -777,6 +777,7 @@ pub fn fiscal_bridge_run(
     }
     if let Ok(mut s) = state.lock() {
         s.configured = true;
+        s.stopped_at = None;
     }
     let db_path = persist::db_path(&app).ok();
     let cfg = WsClientConfig {
@@ -801,6 +802,15 @@ pub fn fiscal_bridge_run(
                     s.connected = false;
                     s.last_error = Some(e.to_string());
                 }
+            }
+            // Etapa 5 — the loop is gone (replaced by another agent, token
+            // revoked, …). Clear `configured` so the agent supervisor in
+            // `shell::agent` (or the operator) can start it again; before
+            // this, a stopped loop blocked every later `fiscal_bridge_run`.
+            if let Ok(mut s) = st.lock() {
+                s.configured = false;
+                s.connected = false;
+                s.stopped_at = Some(crate::fiscal::bridge_client::state::now_unix());
             }
         });
     });

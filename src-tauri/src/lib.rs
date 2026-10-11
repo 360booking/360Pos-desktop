@@ -4,8 +4,12 @@ use std::sync::Mutex;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod desktop_plugin;
 mod escpos;
 mod fiscal;
+mod localdb;
+mod offline;
+mod shell;
 
 /// Holds the spawned fiscal-bridge child process so we can stop it on exit.
 /// Wrapped in Mutex<Option> because we may not always have a child (when
@@ -26,7 +30,7 @@ fn locate_bridge_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
 /// and let it run. stdout/stderr go to the bridge's own log file at
 /// %LocalAppData%\360booking-bridge\bridge.log — keeping POS Desktop's
 /// log focused on UI events.
-fn spawn_fiscal_bridge(app: &tauri::AppHandle) {
+pub(crate) fn spawn_fiscal_bridge(app: &tauri::AppHandle) {
     let bin = match locate_bridge_binary(app) {
         Some(p) => p,
         None => {
@@ -66,7 +70,7 @@ fn spawn_fiscal_bridge(app: &tauri::AppHandle) {
     }
 }
 
-fn stop_fiscal_bridge(app: &tauri::AppHandle) {
+pub(crate) fn stop_fiscal_bridge(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<BridgeChild>() {
         if let Ok(mut guard) = state.0.lock() {
             if let Some(mut child) = guard.take() {
@@ -80,6 +84,18 @@ fn stop_fiscal_bridge(app: &tauri::AppHandle) {
             }
         }
     }
+}
+
+/// True while the bundled sidecar child process is alive.
+pub(crate) fn sidecar_running(app: &tauri::AppHandle) -> bool {
+    if let Some(state) = app.try_state::<BridgeChild>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(child) = guard.as_mut() {
+                return matches!(child.try_wait(), Ok(None));
+            }
+        }
+    }
+    false
 }
 
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
@@ -217,7 +233,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Focus the existing window if the user double-launches.
-            if let Some(window) = app.webview_windows().values().next() {
+            if let Some(window) = app
+                .get_webview_window(shell::MAIN)
+                .or_else(|| app.webview_windows().values().next().cloned())
+            {
+                let _ = window.unminimize();
                 let _ = window.set_focus();
             }
         }))
@@ -229,13 +249,35 @@ pub fn run() {
                 .add_migrations("sqlite:pos-desktop.db", migrations)
                 .build(),
         )
+        .plugin(desktop_plugin::init())
         .manage(BridgeChild(Mutex::new(None)))
+        .manage(localdb::LocalDb::new())
+        .manage(offline::OfflineStore::new())
         .setup(|app| {
-            // Auto-launch the bundled fiscal-bridge sidecar so cashiers don't
-            // have to install/start it separately. The bridge's single_instance
-            // lock makes this a no-op if a service-installed copy is already
-            // running on the box.
-            spawn_fiscal_bridge(&app.handle().clone());
+            let handle = app.handle().clone();
+            // Etapa 5 — station config first: it decides what the main
+            // window loads and which fiscal agent runs.
+            let cfg = shell::config::load(&handle);
+            log::info!(
+                "shell: mode={} tenant={} kiosk={} agent={}",
+                cfg.mode,
+                if cfg.tenant_url.is_empty() { "(unset)" } else { cfg.tenant_url.as_str() },
+                cfg.kiosk,
+                cfg.fiscal_agent
+            );
+            // Receipts interrupted by a crash/power cut are flagged for a
+            // manual check — never reprinted automatically.
+            match offline::with_store(&handle, |c| offline::recover_interrupted(c)) {
+                Ok(n) if n > 0 => log::warn!("offline: {n} receipt(s) interrupted mid-print flagged for review"),
+                Ok(_) => {}
+                Err(e) => log::warn!("offline: store init failed: {e}"),
+            }
+            shell::start_connectivity_monitor();
+            shell::create_main_window(&handle)?;
+            // Fiscal agent: the Rust agent from saved credentials, else the
+            // bundled fiscal-bridge sidecar (its single_instance lock makes
+            // it a no-op next to a service-installed copy). Supervised.
+            shell::agent::start(&handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -272,6 +314,22 @@ pub fn run() {
             fiscal::commands::fiscal_upsert_station_pairing,
             fiscal::commands::fiscal_clear_station_pairing,
             escpos::escpos_send,
+            localdb::db_select,
+            localdb::db_execute,
+            localdb::db_begin,
+            localdb::db_commit,
+            localdb::db_rollback,
+            localdb::db_reset_session,
+            shell::shell_get_config,
+            shell::shell_set_config,
+            shell::shell_test_tenant,
+            shell::shell_open_pos,
+            shell::shell_open_offline,
+            shell::shell_open_fiscal_settings,
+            shell::shell_set_kiosk,
+            shell::shell_quit,
+            shell::agent::shell_fiscal_health,
+            shell::agent::shell_fiscal_reconnect,
         ])
         .build(tauri::generate_context!())
         .expect("error while building 360booking POS")
@@ -279,8 +337,15 @@ pub fn run() {
             RunEvent::ExitRequested { .. } => {
                 stop_fiscal_bridge(app);
             }
-            RunEvent::WindowEvent { event: WindowEvent::Destroyed, .. } => {
+            // Only the main window ends the session; closing the fiscal
+            // settings window must not kill the fiscal agent.
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == shell::MAIN => {
                 stop_fiscal_bridge(app);
+                app.exit(0);
             }
             _ => {}
         });

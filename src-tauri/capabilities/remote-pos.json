@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-pos",
+  "description": "The web POS loaded from https://360booking.ro / https://<tenant>.360booking.ro may call ONLY the desktop bridge (desktop:default). Custom tenant domains get the same capability at runtime (shell::ensure_remote_capability).",
+  "windows": [
+    "main"
+  ],
+  "local": false,
+  "remote": {
+    "urls": [
+      "https://360booking.ro",
+      "https://*.360booking.ro"
+    ]
+  },
+  "permissions": [
+    "desktop:default"
+  ]
+}

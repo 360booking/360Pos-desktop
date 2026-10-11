@@ -155,3 +155,58 @@ describe('tauriExecutor — retry on database is locked', () => {
     expect((db.execute as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
   });
 });
+
+describe('tauriExecutor — Etapa 5 single-connection store', () => {
+  it('uses begin/commit of the store when present (same connection as the statements)', async () => {
+    const order: string[] = [];
+    const db = {
+      select: vi.fn(async () => []),
+      execute: vi.fn(async (sql: string) => {
+        order.push(sql);
+        return { rowsAffected: 1 };
+      }),
+      begin: vi.fn(async () => {
+        order.push('<begin>');
+      }),
+      commit: vi.fn(async () => {
+        order.push('<commit>');
+      }),
+      rollback: vi.fn(async () => {
+        order.push('<rollback>');
+      }),
+    };
+    const exec = tauriExecutor(db);
+    await exec.transaction(async (tx) => {
+      await tx.execute('INSERT 1');
+    });
+    await expect(
+      exec.transaction(async (tx) => {
+        await tx.execute('INSERT 2');
+        throw new Error('nope');
+      }),
+    ).rejects.toThrow('nope');
+    expect(order).toEqual(['<begin>', 'INSERT 1', '<commit>', '<begin>', 'INSERT 2', '<rollback>']);
+  });
+
+  it('two executors share one FIFO, so a write cannot slip into another transaction', async () => {
+    const order: string[] = [];
+    const mk = (tag: string) => ({
+      select: vi.fn(async () => []),
+      execute: vi.fn(async (sql: string) => {
+        await new Promise((r) => setTimeout(r, 10));
+        order.push(`${tag}:${sql}`);
+        return { rowsAffected: 1 };
+      }),
+    });
+    const a = tauriExecutor(mk('a'));
+    const b = tauriExecutor(mk('b'));
+    const tx = a.transaction(async (t) => {
+      await t.execute('X');
+      await t.execute('Y');
+    });
+    const stray = b.execute('Z');
+    await Promise.all([tx, stray]);
+    const z = order.indexOf('b:Z');
+    expect(z === 0 || z === order.length - 1).toBe(true);
+  });
+});

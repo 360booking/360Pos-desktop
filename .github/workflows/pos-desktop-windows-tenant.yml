@@ -15,6 +15,15 @@ name: pos-desktop-windows-tenant
 # tenant MSI to avoid surprising pilots with an unannounced installer.
 
 on:
+  # Etapa 5 — the feature branch also builds the tenant installer on push so
+  # the owner can download it without dispatching by hand. main stays
+  # manual-only.
+  push:
+    branches:
+      - etapa5-pos-web-offline
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
     inputs:
       backend_url:
@@ -42,7 +51,7 @@ jobs:
       # Sprint 10 production-shape build:
       POS_BUILD_PROFILE: tenant
       VITE_SYNC_TRANSPORT_MODE: http
-      VITE_BACKEND_URL: ${{ inputs.backend_url }}
+      VITE_BACKEND_URL: ${{ inputs.backend_url || 'https://360booking.ro' }}
       # Hardware safety: the adapter registry already forces simulator
       # for every fiscal/payment/printer branch. This env mirror is
       # belt-and-braces so the build profile cannot accidentally light

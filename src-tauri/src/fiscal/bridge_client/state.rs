@@ -13,6 +13,10 @@ pub struct BridgeState {
     pub last_heartbeat_at: Option<u64>,
     pub last_error: Option<String>,
     pub close_code: Option<u16>,
+    /// Etapa 5 — unix time the WSS loop thread last exited (None while it
+    /// runs or before it ever ran). The agent supervisor uses it to decide
+    /// when to restart the loop.
+    pub stopped_at: Option<u64>,
 }
 
 impl Default for BridgeState {
@@ -26,6 +30,7 @@ impl Default for BridgeState {
             last_heartbeat_at: None,
             last_error: None,
             close_code: None,
+            stopped_at: None,
         }
     }
 }

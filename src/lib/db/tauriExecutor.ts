@@ -25,10 +25,25 @@
  * the pos-desktop's traffic is dominated by writes during hydrate
  * anyway.
  */
-import type Database from '@tauri-apps/plugin-sql';
-
 import { logger } from '@/lib/logger';
 import type { SqlExecutor } from './executor';
+
+/**
+ * Etapa 5 — the statement surface the executor needs. In the shell this is
+ * the Rust single-connection store (`lib/db.ts` → `db_*` commands); in the
+ * tests it is a fake. `begin/commit/rollback` run on the SAME connection as
+ * the statements (BEGIN IMMEDIATE in Rust), which is what finally fixes the
+ * pilot's `database is locked`: with the old sqlx pool, BEGIN and COMMIT
+ * could land on different pooled connections and leave a write
+ * transaction dangling.
+ */
+export interface StatementDb {
+  select<T = unknown>(sql: string, params?: unknown[]): Promise<T>;
+  execute(sql: string, params?: unknown[]): Promise<{ rowsAffected: number; lastInsertId?: number }>;
+  begin?: () => Promise<void>;
+  commit?: () => Promise<void>;
+  rollback?: () => Promise<void>;
+}
 
 // Retry budget grew from [50, 200, 500] (≈750ms total) after pilot
 // observed an 11s catalog hydrate batch holding the connection while
@@ -95,24 +110,34 @@ interface QueuedExecutor extends SqlExecutor {
   pendingDepth: () => number;
 }
 
-export function tauriExecutor(db: Database): SqlExecutor {
-  // Single FIFO chain. Each enqueued task awaits the previous one
-  // before running — so two writes from different code paths can never
-  // open competing transactions or be interleaved.
-  let chain: Promise<unknown> = Promise.resolve();
-  let pending = 0;
+// Single process-wide FIFO chain (Etapa 5: shared by every executor AND by
+// the plain `initDb()` handle used by auth storage / print cache / debug
+// log). Each task awaits the previous one — two writes from different code
+// paths can never interleave with an open transaction.
+let chain: Promise<unknown> = Promise.resolve();
+let pending = 0;
 
-  function enqueue<T>(label: string, fn: () => Promise<T>): Promise<T> {
-    pending += 1;
-    const next = chain
-      .catch(() => undefined) // never let a previous failure poison the chain
-      .then(() => withRetry(label, fn))
-      .finally(() => {
-        pending -= 1;
-      });
-    chain = next;
-    return next;
-  }
+export function enqueueDb<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  pending += 1;
+  const next = chain
+    .catch(() => undefined) // never let a previous failure poison the chain
+    .then(() => withRetry(label, fn))
+    .finally(() => {
+      pending -= 1;
+    });
+  chain = next;
+  return next;
+}
+
+export function dbQueueDepth(): number {
+  return pending;
+}
+
+export function tauriExecutor(db: StatementDb): SqlExecutor {
+  const enqueue = enqueueDb;
+  const begin = () => (db.begin ? db.begin() : db.execute('BEGIN').then(() => undefined));
+  const commit = () => (db.commit ? db.commit() : db.execute('COMMIT').then(() => undefined));
+  const rollback = () => (db.rollback ? db.rollback() : db.execute('ROLLBACK').then(() => undefined));
 
   // Inner executor used by `transaction`'s callback. It does NOT
   // re-enqueue — the outer transaction holds the mutex for the
@@ -148,7 +173,7 @@ export function tauriExecutor(db: Database): SqlExecutor {
       return enqueue('transaction', async () => {
         let beganOk = false;
         try {
-          await db.execute('BEGIN');
+          await begin();
           beganOk = true;
         } catch (err) {
           // BEGIN itself failed — we still run statements (in autocommit)
@@ -162,7 +187,7 @@ export function tauriExecutor(db: Database): SqlExecutor {
           const out = await fn(inner);
           if (beganOk) {
             try {
-              await db.execute('COMMIT');
+              await commit();
             } catch (err) {
               if (!isNoActiveTransactionError(err)) {
                 throw err;
@@ -178,7 +203,7 @@ export function tauriExecutor(db: Database): SqlExecutor {
         } catch (err) {
           if (beganOk) {
             try {
-              await db.execute('ROLLBACK');
+              await rollback();
             } catch (rbErr) {
               if (!isNoActiveTransactionError(rbErr)) {
                 logger.warn('db', 'ROLLBACK threw a non-noop error', {

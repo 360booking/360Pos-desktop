@@ -17,7 +17,7 @@
  * race. Belt + braces.
  */
 import { tauriExecutor } from '@/lib/db/tauriExecutor';
-import { initDb } from '@/lib/db';
+import { initDb, rawDb } from '@/lib/db';
 import { getApiClient } from '@/lib/api/client';
 import { getConfig } from '@/lib/config';
 import { logger } from '@/lib/logger';
@@ -142,8 +142,11 @@ export async function startSyncEngine(opts: StartSyncEngineOptions = {}): Promis
   if (_engine) return _engine;
   if (!isTauri()) return null;
 
-  const db = await initDb();
-  const exec = tauriExecutor(db);
+  // initDb() runs the migrations; the executor then talks to the Rust
+  // single-connection store directly (it holds the shared FIFO itself, so
+  // it must use the un-queued statements).
+  await initDb();
+  const exec = tauriExecutor(rawDb);
   const store = createEventStore(exec);
   const transport = buildTransport();
   const worker = createOutboxWorker({
