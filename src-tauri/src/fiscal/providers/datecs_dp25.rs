@@ -540,21 +540,28 @@ mod tests {
             cmd_codes: CmdCodes::default(),
         });
         let bytes = p.build_open_fiscal();
-        assert_eq!(bytes, b"1\t0001\t1");
+        // DUDE capture 2026-04-28: op, password, till + 3 reserved fields.
+        assert_eq!(bytes, b"1\t0001\t1\t\t\t");
     }
 
     #[test]
     fn register_item_format_matches_python() {
-        let bytes = DatecsDp25Provider::build_register_item(&item("Cafea", 1.0, 5.0, 0.19));
+        // DP-25X shape from the DUDE capture (TX 528): numeric VAT id,
+        // dept/discount/disc_type/unit + trailing TAB. (The FP-55 "TA"
+        // letter format this test used to expect is gone since 5bc28d5.)
+        let bytes = DatecsDp25Provider::build_register_item(&item("Cafea", 1.0, 5.0, 0.21));
         let s = String::from_utf8_lossy(&bytes);
-        assert_eq!(s, "Cafea\tTA\t5.00\t1.00");
+        assert_eq!(s, "Cafea\t1\t5.00\t1.00\t0\t0.00\t0\tbuc\t");
+        let food = DatecsDp25Provider::build_register_item(&item("Ciorba", 1.0, 5.0, 0.11));
+        assert_eq!(String::from_utf8_lossy(&food), "Ciorba\t2\t5.00\t1.00\t0\t0.00\t0\tbuc\t");
     }
 
     #[test]
     fn register_item_truncates_long_name() {
         let long = "A".repeat(50);
         let bytes = DatecsDp25Provider::build_register_item(&item(&long, 1.0, 1.0, 0.19));
-        let s = String::from_utf8_lossy(&bytes);
+        // The frame is CP1250 ('…' = 0x85), not UTF-8.
+        let (s, _, _) = encoding_rs::WINDOWS_1250.decode(&bytes);
         let parts: Vec<&str> = s.split('\t').collect();
         assert!(parts[0].chars().count() <= 36);
         assert!(parts[0].ends_with('…'));
@@ -609,7 +616,7 @@ mod tests {
         // sign is in the storno open frame, not the item line itself. Datecs
         // firmware infers the negative based on the storno discriminator.
         // Confirm parity with the positive register_item.
-        assert_eq!(s, "Cafea\tTA\t5.00\t2.00");
+        assert_eq!(s, "Cafea\t1\t5.00\t2.00\t0\t0.00\t0\tbuc\t");
     }
 
     #[test]
@@ -617,10 +624,11 @@ mod tests {
         let cash = DatecsDp25Provider::build_payment(&ReceiptPayment {
             method: PaymentMethod::Cash, amount: 12.34,
         });
-        assert_eq!(String::from_utf8_lossy(&cash), "0\t12.34");
+        // DUDE capture (TX 608): `<code>\t<amount>\t`.
+        assert_eq!(String::from_utf8_lossy(&cash), "0\t12.34\t");
         let card = DatecsDp25Provider::build_payment(&ReceiptPayment {
             method: PaymentMethod::Card, amount: 5.0,
         });
-        assert_eq!(String::from_utf8_lossy(&card), "2\t5.00");
+        assert_eq!(String::from_utf8_lossy(&card), "2\t5.00\t");
     }
 }
