@@ -135,6 +135,10 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
 - nu modifică produsele notei și nu deschide note noi;
 - nu închide note cu reducere, bacșiș sau plată parțială (se închid online);
 - o singură metodă de plată pe notă (numerar sau card);
+- nu emite bonuri dacă stația nu are casa configurată (provider „simulator”);
+  pentru un test fără casă reală există bifa *Avansat → Permite casa offline
+  cu simulatorul* — **doar pe o stație de test**, fiindcă numărul de bon
+  simulat ajunge pe server ca bon offline;
 - cota TVA vine de la server pe fiecare produs; dacă lipsește se folosește
   cota implicită a stației (Ctrl+Shift+F → Stație → Avansat, implicit 21%)
   și e marcată cu * pe ecran.

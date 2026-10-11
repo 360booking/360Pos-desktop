@@ -150,4 +150,14 @@ jobs:
       # the installer, but still fails the run.
       - name: Rust unit tests
         shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: |
+          $out = cargo test --manifest-path src-tauri/Cargo.toml --lib 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            # Surface the failures as annotations (readable without log access).
+            $rel = $out -split "`r?`n" | Where-Object { $_ -match "panicked at|^test .* FAILED|^error(\[E\d+\])?:|-->|assertion|left:|right:|^failures:|^    [a-z_:]+$" } | Select-Object -First 80
+            $msg = ($rel | ForEach-Object { $_.Trim() }) -join "%0A"
+            Write-Host "::error title=cargo test::$msg"
+            exit $code
+          }

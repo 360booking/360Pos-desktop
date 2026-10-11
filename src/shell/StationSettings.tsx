@@ -177,6 +177,17 @@ function AdvancedFields({
         <input className={input} value={vatText} onChange={(e) => setVatText(e.target.value)} inputMode="decimal" />
         <span className="block text-[11px] text-slate-500">Doar pentru produsele fără cotă primită de la server.</span>
       </label>
+      <label className="flex items-start gap-2 text-xs text-slate-300 sm:col-span-3">
+        <input
+          type="checkbox"
+          checked={cfg.offlineAllowSimulator}
+          onChange={(e) => set('offlineAllowSimulator', e.target.checked)}
+        />
+        <span>
+          Permite casa offline cu simulatorul — <b>doar pentru test</b>. Bonurile simulate ajung pe server ca bonuri reale
+          offline; nu bifa pe o stație de producție.
+        </span>
+      </label>
       <label className="block space-y-1">
         <span className="text-xs font-semibold text-slate-300">Interfață</span>
         <select className={input} value={cfg.mode} onChange={(e) => set('mode', e.target.value as ShellConfig['mode'])}>

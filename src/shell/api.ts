@@ -17,6 +17,7 @@ export interface ShellConfig {
   autostart: boolean;
   fiscalAgent: 'auto' | 'rust' | 'sidecar' | 'off';
   offlineDefaultVat: number;
+  offlineAllowSimulator: boolean;
 }
 
 export interface ShellState {

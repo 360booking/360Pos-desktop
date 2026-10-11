@@ -124,7 +124,13 @@ async fn offline_close_order(app: AppHandle, request: CloseRequest) -> Result<Jo
             .and_then(|p| runtime_config::read(&p).ok())
             .unwrap_or_default();
         let provider_name = runtime_config::effective_provider(&rc);
-        let default_vat = config::current().offline_default_vat;
+        let station = config::current();
+        let default_vat = station.offline_default_vat;
+        if provider_name == "simulator" && !station.offline_allow_simulator {
+            return Err("Casa de marcat nu este configurată pe această stație (simulator). \
+                        Configureaz-o din „Casă de marcat” (Ctrl+Shift+F) ca să emiți bonuri offline."
+                .into());
+        }
 
         let prepared = offline::with_store(app, |c| {
             offline::prepare_close(c, &request, default_vat, &provider_name)

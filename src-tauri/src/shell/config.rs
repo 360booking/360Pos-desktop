@@ -35,6 +35,10 @@ pub struct ShellConfig {
     /// VAT used on an offline receipt line when the web POS could not tell
     /// the rate of that product (fraction, 0.21 = 21%).
     pub offline_default_vat: f64,
+    /// Test only: let the offline till "print" on the simulator. Off by
+    /// default so an unconfigured station can never send a fake BF number
+    /// to the server as a real offline receipt.
+    pub offline_allow_simulator: bool,
 }
 
 impl Default for ShellConfig {
@@ -47,6 +51,7 @@ impl Default for ShellConfig {
             autostart: false,
             fiscal_agent: "auto".into(),
             offline_default_vat: 0.21,
+            offline_allow_simulator: false,
         }
     }
 }
