@@ -4,6 +4,24 @@ Premium Windows POS for the 360booking restaurant module. Tauri 2 + React 18 + T
 
 > **Status:** Sprint 0 — scaffold + UI parity skeleton + simulator adapters. No live data yet. Do not deploy.
 
+## Etapa 5 — shell pentru POS-ul web (ramura `etapa5-pos-web-offline`)
+
+Din Etapa 5 fereastra principală încarcă **POS-ul web** al restaurantului
+(`https://<tenant>/admin/restaurant/pos`); interfața React din acest repo
+rămâne pentru paginile locale (configurare stație, casă offline, fereastra
+fiscală) și ca mod „legacy”.
+
+| Ce | Unde |
+|---|---|
+| Ferestre, chioșc, pornire cu Windows, monitor conexiune | `src-tauri/src/shell/mod.rs`, `shell/config.rs` |
+| Agent fiscal pornit/supravegheat + watchdog casă | `src-tauri/src/shell/agent.rs` |
+| Puntea pentru POS-ul web (`window.desktopBridge`) | `src-tauri/src/shell/bridge.js`, `src-tauri/src/desktop_plugin.rs`, `capabilities/remote-pos.json` |
+| Casa offline + jurnal (`pos-offline.db`) | `src-tauri/src/offline.rs`, `src/shell/OfflineTill.tsx` |
+| Fix „database is locked” (o conexiune, WAL) | `src-tauri/src/localdb.rs`, `src/lib/db.ts` |
+| Partea web (cache note + sincronizare) | repo `frontend`: `src/lib/desktopBridge.ts` |
+
+Ghid de instalare și test pentru proprietar: [`docs/INSTALARE-TEST.md`](docs/INSTALARE-TEST.md).
+
 ## Quick start (developer)
 
 Prerequisites:

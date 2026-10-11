@@ -144,3 +144,10 @@ jobs:
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+
+      # Etapa 5 — Rust unit tests (offline journal, local DB, VAT mapping,
+      # station config). Runs after the upload so a red test never hides
+      # the installer, but still fails the run.
+      - name: Rust unit tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
