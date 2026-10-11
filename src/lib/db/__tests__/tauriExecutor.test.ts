@@ -175,7 +175,7 @@ describe('tauriExecutor — Etapa 5 single-connection store', () => {
         order.push('<rollback>');
       }),
     };
-    const exec = tauriExecutor(db);
+    const exec = tauriExecutor(db as never);
     await exec.transaction(async (tx) => {
       await tx.execute('INSERT 1');
     });
@@ -198,8 +198,8 @@ describe('tauriExecutor — Etapa 5 single-connection store', () => {
         return { rowsAffected: 1 };
       }),
     });
-    const a = tauriExecutor(mk('a'));
-    const b = tauriExecutor(mk('b'));
+    const a = tauriExecutor(mk('a') as never);
+    const b = tauriExecutor(mk('b') as never);
     const tx = a.transaction(async (t) => {
       await t.execute('X');
       await t.execute('Y');
