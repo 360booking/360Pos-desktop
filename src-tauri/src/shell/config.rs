@@ -23,8 +23,14 @@ pub struct ShellConfig {
     pub tenant_url: String,
     /// Path of the POS screen on the tenant site.
     pub pos_path: String,
-    /// Fullscreen, no window frame. Ctrl+Shift+K toggles it.
+    /// Fullscreen, no window frame. F11 or Ctrl+Shift+K toggles it.
+    /// On by default (2026-10-13): a till is a full-screen app.
     pub kiosk: bool,
+    /// True once someone chose the kiosk setting on this station (settings
+    /// form, F11, Ctrl+Shift+K). Until then the station starts in kiosk
+    /// mode — also stations whose file was written by an older version,
+    /// where `kiosk: false` was only the old default, never a choice.
+    pub kiosk_chosen: bool,
     /// Start with Windows (HKCU Run key).
     pub autostart: bool,
     /// "auto" | "rust" | "sidecar" | "off" — which fiscal agent runs.
@@ -47,7 +53,8 @@ impl Default for ShellConfig {
             mode: "web".into(),
             tenant_url: String::new(),
             pos_path: DEFAULT_POS_PATH.into(),
-            kiosk: false,
+            kiosk: true,
+            kiosk_chosen: false,
             autostart: false,
             fiscal_agent: "auto".into(),
             offline_default_vat: 0.21,
@@ -116,6 +123,14 @@ pub fn normalise_tenant_url(raw: &str) -> Result<Url, String> {
     Url::parse(&origin).map_err(|e| format!("Adresă invalidă: {e}"))
 }
 
+/// A station where nobody chose the window mode starts full screen.
+pub fn apply_kiosk_default(mut cfg: ShellConfig) -> ShellConfig {
+    if !cfg.kiosk_chosen {
+        cfg.kiosk = true;
+    }
+    cfg
+}
+
 static CURRENT: OnceLock<Mutex<ShellConfig>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<ShellConfig> {
@@ -135,6 +150,7 @@ pub fn load(app: &AppHandle) -> ShellConfig {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<ShellConfig>(&s).ok())
         .unwrap_or_default();
+    let cfg = apply_kiosk_default(cfg);
     if let Ok(mut g) = slot().lock() {
         *g = cfg.clone();
     }
@@ -208,5 +224,24 @@ mod tests {
         assert_eq!(c.mode, "web");
         assert_eq!(c.fiscal_agent, "auto");
         assert!((c.offline_default_vat - 0.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn old_file_with_kiosk_off_starts_full_screen() {
+        // Written by a version where `kiosk: false` was just the default.
+        let c: ShellConfig =
+            serde_json::from_str(r#"{"tenantUrl":"x.360booking.ro","kiosk":false}"#).unwrap();
+        assert!(!c.kiosk_chosen);
+        assert!(apply_kiosk_default(c).kiosk);
+    }
+
+    #[test]
+    fn explicit_kiosk_off_is_kept() {
+        let c: ShellConfig = serde_json::from_str(
+            r#"{"tenantUrl":"x.360booking.ro","kiosk":false,"kioskChosen":true}"#,
+        )
+        .unwrap();
+        assert!(!apply_kiosk_default(c).kiosk);
+        assert!(ShellConfig::default().kiosk);
     }
 }

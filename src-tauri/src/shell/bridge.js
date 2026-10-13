@@ -48,8 +48,14 @@
   // Keyboard shortcuts (work on every page of the main window).
   //   Ctrl+Shift+F  fiscal settings window
   //   Ctrl+Shift+O  offline till
-  //   Ctrl+Shift+K  kiosk on/off
+  //   Ctrl+Shift+K  kiosk (full screen) on/off
+  //   F11           the same — the key everyone knows from browsers
   window.addEventListener('keydown', function (ev) {
+    if (ev.key === 'F11' && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey) {
+      ev.preventDefault();
+      if (!ev.repeat) bridge.toggleKiosk().catch(function (e) { console.warn('[desktop]', e); });
+      return;
+    }
     if (!ev.ctrlKey || !ev.shiftKey || ev.altKey) return;
     var k = (ev.key || '').toLowerCase();
     var run = null;

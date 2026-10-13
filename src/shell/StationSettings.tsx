@@ -102,7 +102,7 @@ export function StationSettings({
           <input type="checkbox" checked={cfg.kiosk} onChange={(e) => set('kiosk', e.target.checked)} />
           <span>
             Mod chioșc (ecran complet, fără bară de titlu)
-            <span className="block text-xs text-slate-400">Ctrl+Shift+K îl pornește/oprește oricând.</span>
+            <span className="block text-xs text-slate-400">F11 sau Ctrl+Shift+K îl pornește/oprește oricând. Oprit, fereastra rămâne maximizată.</span>
           </span>
         </label>
         <label className="flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm text-slate-200">

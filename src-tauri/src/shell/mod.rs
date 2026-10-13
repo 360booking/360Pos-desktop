@@ -183,11 +183,22 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     ensure_remote_capability(app, &cfg);
     let url = initial_main_url(app, &cfg);
     let nav_app = app.clone();
+    // 2026-10-13 („nu e pe tot ecranul, jos pare tăiat, la tras se mișcă”):
+    // the window used to open as a floating 1366×820 window. On a 1366×768
+    // screen — or 1920×1080 at 150 % scaling (1280×720 logical) — that is
+    // taller than the screen, so the bottom bar of the POS fell under the
+    // taskbar, and dragging the title bar moved the whole POS around.
+    // Now: kiosk → borderless full screen on the monitor the window opens
+    // on (the primary one); kiosk off → maximised (fills the work area,
+    // taskbar stays visible). The size below is only the "restore" size, and
+    // the minimum fits a 1366×768 screen at 150 % (911×512 logical).
     let mut b = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(url))
         .title("360booking POS")
-        .inner_size(1366.0, 820.0)
-        .min_inner_size(1024.0, 700.0)
+        .inner_size(1280.0, 720.0)
+        .min_inner_size(800.0, 500.0)
         .resizable(true)
+        .center()
+        .maximized(true)
         .initialization_script(BRIDGE_JS)
         .on_navigation(move |u| navigation_allowed(&nav_app, u));
     if cfg.kiosk {
@@ -250,6 +261,11 @@ pub fn set_kiosk(app: &AppHandle, on: bool) -> Result<bool, String> {
     let w = main_window(app).ok_or_else(|| "fereastra principală lipsește".to_string())?;
     w.set_decorations(!on).map_err(|e| e.to_string())?;
     w.set_fullscreen(on).map_err(|e| e.to_string())?;
+    if !on {
+        // Leaving full screen restores the old window size; maximise so the
+        // POS still fits the screen (bottom bar above the taskbar).
+        let _ = w.maximize();
+    }
     KIOSK.store(on, Ordering::Relaxed);
     Ok(on)
 }
@@ -259,6 +275,7 @@ pub fn toggle_kiosk(app: &AppHandle) -> Result<bool, String> {
     set_kiosk(app, on)?;
     let mut cfg = config::current();
     cfg.kiosk = on;
+    cfg.kiosk_chosen = true;
     let _ = config::save(app, &cfg);
     Ok(on)
 }
@@ -406,6 +423,9 @@ pub async fn shell_set_config(app: AppHandle, config: ShellConfig) -> Result<She
         return Err("Mod necunoscut.".into());
     }
     let prev = config::current();
+    // Saved from the settings form, where the kiosk checkbox is visible:
+    // whatever it says now is a choice and survives restarts.
+    next.kiosk_chosen = true;
     config::save(&app, &next)?;
     if prev.autostart != next.autostart {
         if let Err(e) = set_autostart(next.autostart) {
@@ -462,6 +482,7 @@ pub async fn shell_set_kiosk(app: AppHandle, on: bool) -> Result<bool, String> {
     let r = set_kiosk(&app, on)?;
     let mut cfg = config::current();
     cfg.kiosk = on;
+    cfg.kiosk_chosen = true;
     let _ = config::save(&app, &cfg);
     Ok(r)
 }

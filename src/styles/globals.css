@@ -24,10 +24,16 @@ body,
 html,
 body {
   overflow: hidden; /* desktop POS is a fixed app shell, no body scroll */
+  overscroll-behavior: none; /* no rubber-band / swipe-back on touch screens */
 }
 
 #root {
-  height: 100vh;
+  height: 100%;
+}
+
+img,
+a {
+  -webkit-user-drag: none;
 }
 
 body {

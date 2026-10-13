@@ -14,6 +14,8 @@ export interface ShellConfig {
   tenantUrl: string;
   posPath: string;
   kiosk: boolean;
+  /** Set by the shell once the kiosk mode was chosen on this station. */
+  kioskChosen?: boolean;
   autostart: boolean;
   fiscalAgent: 'auto' | 'rust' | 'sidecar' | 'off';
   offlineDefaultVat: number;
