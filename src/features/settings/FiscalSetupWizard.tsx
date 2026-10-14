@@ -126,8 +126,9 @@ interface BridgeState {
   close_code: number | null;
 }
 
+// 2026-10-14: no "Simulator" here — it answered "printed" without touching
+// the register (the owner's "bon de test reușit, dar nu a ieșit nimic").
 const PROVIDERS = [
-  { value: 'simulator', label: 'Simulator (fără casă fizică)' },
   { value: 'datecs_dp25', label: 'Datecs DP-25 (FP-55)' },
   { value: 'datecs_fp', label: 'Datecs FP-700 / DP-150' },
 ];
@@ -140,7 +141,7 @@ const DEFAULT_SERVER = 'https://360booking.ro';
 
 function emptyHardware(): FiscalRuntimeConfig {
   return {
-    provider: 'simulator',
+    provider: null,
     serial_port: null,
     baud: 9600,
     protocol_variant: 'fp55',
@@ -353,14 +354,14 @@ export function FiscalSetupWizard({ onChanged }: { onChanged?: () => void } = {}
       const r = await invoke<ClaimResponse>('fiscal_bridge_claim', {
         serverBaseUrl: server,
         code: code.trim().toUpperCase(),
-        printerModel: hw.provider ?? 'simulator',
+        printerModel: hw.provider ?? 'datecs_dp25',
         deviceId: deviceId || null,
       });
       setClaim(r);
       await invoke('fiscal_bridge_run', {
         websocketUrl: r.websocket_url,
         deviceToken: r.device_token,
-        printerModel: hw.provider ?? 'simulator',
+        printerModel: hw.provider ?? 'datecs_dp25',
       });
       try {
         const next = await pullFiscalConfig(server, r.device_token);
@@ -550,7 +551,7 @@ export function FiscalSetupWizard({ onChanged }: { onChanged?: () => void } = {}
         <div className="rounded-xl border border-white/10 bg-slate-900/40 p-4 space-y-3 text-sm">
           <Row label="Provider">
             <select
-              value={hw.provider ?? 'simulator'}
+              value={hw.provider && hw.provider !== 'simulator' ? hw.provider : ''}
               onChange={(e) => {
                 const next = e.target.value;
                 // Auto-adjust password placeholder when switching family,
@@ -559,11 +560,12 @@ export function FiscalSetupWizard({ onChanged }: { onChanged?: () => void } = {}
                 const nextPwd = hw.operator_password === prevDefault || hw.operator_password === '' || hw.operator_password === null
                   ? defaultPasswordFor(next)
                   : hw.operator_password;
-                setHw({ ...hw, provider: next, operator_password: nextPwd });
+                setHw({ ...hw, provider: next || null, operator_password: nextPwd });
               }}
               disabled={!hwLoaded}
               className="bg-slate-800/80 border border-white/10 rounded-lg px-3 py-1.5 text-slate-100 text-sm w-full"
             >
+              <option value="">— alege casa de marcat —</option>
               {PROVIDERS.map((p) => (
                 <option key={p.value} value={p.value}>{p.label}</option>
               ))}

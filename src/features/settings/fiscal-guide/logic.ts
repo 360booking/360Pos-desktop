@@ -530,6 +530,8 @@ export interface GuideStatusInput {
   enrolled: boolean;
   /** The agent is connected to the server right now. */
   connected: boolean;
+  /** The server refused the saved token (admin „Deconectează”). */
+  revoked?: boolean;
   /** Test bill printed in this session, or the station was complete on open. */
   testDone: boolean;
 }
@@ -543,7 +545,7 @@ export interface GuideSteps {
 export function deriveSteps(s: GuideStatusInput): GuideSteps {
   const configured = s.configSaved && isRealProvider(s.provider) && Boolean(s.serialPort);
   const s1: StepState = !configured ? 'todo' : s.printerOk === false ? 'error' : 'done';
-  const s2: StepState = s.enrolled ? (s.connected ? 'done' : 'warn') : 'todo';
+  const s2: StepState = s.enrolled ? (s.connected ? 'done' : s.revoked ? 'error' : 'warn') : 'todo';
   const s3: StepState = s.testDone && s1 === 'done' ? 'done' : 'todo';
   const steps: [StepState, StepState, StepState] = [s1, s2, s3];
   const idx = steps.findIndex((x) => x !== 'done');
@@ -587,9 +589,59 @@ export function tillSummary(configured: boolean, answer: boolean | null): { text
   return { text: 'neverificată încă', tone: 'wait' };
 }
 
-export function linkSummary(enrolled: boolean, connected: boolean, running: boolean): { text: string; tone: Tone } {
+export function linkSummary(
+  enrolled: boolean,
+  connected: boolean,
+  running: boolean,
+  revoked = false,
+): { text: string; tone: Tone } {
   if (!enrolled) return { text: 'nelegată', tone: 'off' };
   if (connected) return { text: 'conectată', tone: 'ok' };
+  if (revoked) return { text: 'anulată din admin', tone: 'bad' };
   if (running) return { text: 'se conectează…', tone: 'wait' };
   return { text: 'legată, dar fără conexiune acum', tone: 'bad' };
+}
+
+// --------------------------------------------- connection to the server
+
+/** Shown in step 2 when the server refused this station's token. */
+export const REVOKED_TEXT = 'Legătura a fost anulată din admin — leagă din nou';
+
+/**
+ * Why the agent cannot reach the server, in plain Romanian, from the raw
+ * error the Rust WSS loop keeps (`bridge.last_error`). Shown in the summary
+ * bar as „Nu mă pot conecta la server: <motiv>”.
+ */
+export function explainConnectionError(raw: unknown): string {
+  const text = String(raw ?? '').trim();
+  const t = text.toLowerCase();
+  if (!t) return 'motiv necunoscut';
+  if (/auth rejected|http 40[13]|\b40[13]\b|re-enroll|revoked|4001|4403/.test(t)) {
+    return 'legătura a fost anulată din admin — leagă stația din nou cu un cod nou (pasul 2)';
+  }
+  if (/certificate|unknownissuer|unknown issuer|invalid peer|webpki|tls|ssl|handshake/.test(t)) {
+    return 'certificatul de securitate al serverului nu e recunoscut pe acest calculator (TLS/certificat). Actualizează aplicația; dacă persistă, verifică antivirusul sau proxy-ul';
+  }
+  if (/dns|failed to lookup|no such host|name resolution|nodename|os error 11001|getaddrinfo/.test(t)) {
+    return 'nu găsesc adresa 360booking.ro (DNS) — verifică internetul';
+  }
+  if (/refused|os error 10061|connection reset|os error 10054/.test(t)) {
+    return 'serverul a refuzat conexiunea — poate un firewall, antivirus sau proxy';
+  }
+  if (/timed out|timeout|os error 10060/.test(t)) {
+    return 'serverul nu răspunde (timeout) — verifică internetul';
+  }
+  if (/network is unreachable|os error 10051|no route|os error 10065/.test(t)) {
+    return 'calculatorul nu are internet';
+  }
+  if (/proxy/.test(t)) {
+    return 'un proxy blochează conexiunea';
+  }
+  if (/replaced by another bridge|4000/.test(t)) {
+    return 'altă aplicație (alt calculator) s-a legat cu același restaurant';
+  }
+  if (/http 5\d\d|server close/.test(t)) {
+    return 'serverul 360booking are o problemă temporară — reîncerc singur';
+  }
+  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
 }

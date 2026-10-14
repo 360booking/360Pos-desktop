@@ -15,7 +15,7 @@
  * the agent auto-start and web POS printing keep working as before.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ClipboardPaste, Link2, Printer, RefreshCw, Search, ShieldAlert, Usb } from 'lucide-react';
+import { ClipboardCopy, ClipboardPaste, FolderOpen, Link2, Printer, RefreshCw, Search, ShieldAlert, Usb } from 'lucide-react';
 
 import { enableRustFiscalIfAllowed } from '@/adapters';
 import { getCachedFiscalConfig, pullFiscalConfig } from '@/adapters/fiscal/config';
@@ -39,6 +39,7 @@ import {
   defaultsForModel,
   deriveSteps,
   explainClaimError,
+  explainConnectionError,
   explainFiscalError,
   findModel,
   formFromConfig,
@@ -53,6 +54,7 @@ import {
   summariseSearch,
   tillSummary,
   vatLabel,
+  REVOKED_TEXT,
   type Explained,
   type GuideForm,
   type LocalCheck,
@@ -82,7 +84,8 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 
 function emptyRuntimeConfig(): FiscalRuntimeConfig {
   return {
-    provider: 'simulator',
+    // No "simulator" default (2026-10-14): an unsaved station has no register.
+    provider: null,
     serial_port: null,
     baud: 9600,
     protocol_variant: 'fp55',
@@ -131,6 +134,12 @@ export function FiscalGuide() {
   const [bill, setBill] = useState<Outcome>(IDLE);
   const [xrep, setXrep] = useState<Outcome>(IDLE);
   const [testDone, setTestDone] = useState(false);
+
+  // ------------------------------------------------------------ reports + help
+  const [zStep, setZStep] = useState<0 | 1 | 2>(0);
+  const [zrep, setZrep] = useState<Outcome>(IDLE);
+  const [diag, setDiag] = useState<Outcome>(IDLE);
+  const [diagText, setDiagText] = useState<string | null>(null);
 
   // ------------------------------------------------------------ layout
   const [openStep, setOpenStep] = useState<1 | 2 | 3 | null>(null);
@@ -234,6 +243,10 @@ export function FiscalGuide() {
   const enrolled = Boolean(creds) || Boolean(health?.agent.hasSavedCredentials);
   const connected = Boolean(bridge?.connected) || Boolean(health?.agent.connected);
   const agentRunning = Boolean(bridge?.configured) || Boolean(health?.agent.running);
+  // The server refused the saved token (admin „Deconectează”): step 2 must
+  // not keep saying „Stația e legată ✓”.
+  const revoked = !connected && (Boolean(bridge?.revoked) || Boolean(health?.agent.revoked));
+  const connError = enrolled && !connected ? (bridge?.last_error ?? health?.agent.lastError ?? null) : null;
   const answer = printerAnswer(health?.printer ?? null, localCheck);
   const tillConfigured = configSaved && isRealProvider(cfg?.provider) && Boolean(cfg?.serial_port);
   const { steps, current } = deriveSteps({
@@ -243,6 +256,7 @@ export function FiscalGuide() {
     printerOk: answer,
     enrolled,
     connected,
+    revoked,
     testDone,
   });
   const shownStep = openStep ?? (current === 'done' ? null : current);
@@ -250,7 +264,7 @@ export function FiscalGuide() {
   const model = findModel(form.modelId);
   const savedModel = findModel(formFromConfig(cfg).modelId);
   const till = tillSummary(tillConfigured, answer);
-  const linkS = linkSummary(enrolled, connected, agentRunning);
+  const linkS = linkSummary(enrolled, connected, agentRunning, revoked);
 
   // ------------------------------------------------------------ step 1 actions
   async function refreshPorts() {
@@ -457,6 +471,50 @@ export function FiscalGuide() {
     }
   }
 
+  async function printZ() {
+    setZStep(0);
+    setZrep({ state: 'busy' });
+    try {
+      const token = await shellApi.requestZConfirm();
+      const r = await shellApi.printZReport(token);
+      if (r.status !== 'printed') throw new Error(r.error_message || `Raport Z: ${r.status}`);
+      logger.info('fiscal-guide', 'Z report printed');
+      setZrep({ state: 'ok', text: 'Raportul Z a ieșit ✓ — ziua fiscală e închisă.' });
+    } catch (err) {
+      logger.error('fiscal-guide', 'Z report failed', { err: errText(err) });
+      setZrep({ state: 'err', e: explainFiscalError(errText(err)), raw: errText(err) });
+    }
+  }
+
+  async function copyDiagnostics() {
+    setDiag({ state: 'busy' });
+    let text: string;
+    try {
+      text = await shellApi.diagnostics();
+    } catch (err) {
+      setDiag({ state: 'err', e: { title: 'Nu am putut aduna diagnosticul.', checks: [] }, raw: errText(err) });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setDiagText(null);
+      setDiag({ state: 'ok', text: 'Diagnosticul e copiat ✓ — lipește-l (Ctrl+V) în mesajul către 360booking.' });
+    } catch {
+      // Clipboard refused: show the text so it can be selected by hand.
+      setDiagText(text);
+      setDiag({ state: 'ok', text: 'Selectează textul de mai jos (Ctrl+A, Ctrl+C) și trimite-l la 360booking.' });
+    }
+  }
+
+  async function openLogs() {
+    try {
+      const dir = await shellApi.openLogDir();
+      setDiag({ state: 'ok', text: `Am deschis folderul de jurnale: ${dir}` });
+    } catch (err) {
+      setDiag({ state: 'err', e: { title: 'Nu am putut deschide folderul de jurnale.', checks: [] }, raw: errText(err) });
+    }
+  }
+
   async function reconnect() {
     setReconnecting(true);
     try {
@@ -497,6 +555,11 @@ export function FiscalGuide() {
             Reconectează acum
           </button>
         </div>
+        {connError ? (
+          <div className="mt-2 text-sm text-rose-300" role="status">
+            Nu mă pot conecta la server: {explainConnectionError(connError)}
+          </div>
+        ) : null}
         <ol className="mt-3 flex items-center gap-2">
           {STEP_TITLES.map((t, i) => {
             const n = (i + 1) as 1 | 2 | 3;
@@ -534,9 +597,6 @@ export function FiscalGuide() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button className={btnSecondary} onClick={() => void printX()} disabled={xrep.state === 'busy'}>
-              {xrep.state === 'busy' ? <Spinner /> : <Printer className="h-4 w-4" />} Raport X (nu închide ziua)
-            </button>
             <button className={btnSecondary} onClick={() => setOpenStep(3)}>
               Tipărește un bon de test
             </button>
@@ -544,7 +604,6 @@ export function FiscalGuide() {
               Schimbă setările casei
             </button>
           </div>
-          <Result o={xrep} />
         </div>
       )}
 
@@ -716,9 +775,11 @@ export function FiscalGuide() {
           onOpen={() => setOpenStep(2)}
           title={STEP_TITLES[1]}
           summary={
-            enrolled
-              ? `Stația e legată ✓ — ${connected ? 'conectat la server' : agentRunning ? 'se conectează…' : 'fără conexiune acum'}`
-              : 'O singură dată, cu un cod din adminul 360booking.'
+            revoked
+              ? REVOKED_TEXT
+              : enrolled
+                ? `Stația e legată ✓ — ${connected ? 'conectat la server' : agentRunning ? 'se conectează…' : 'fără conexiune acum'}`
+                : 'O singură dată, cu un cod din adminul 360booking.'
           }
         >
           <div className="space-y-4">
@@ -726,7 +787,19 @@ export function FiscalGuide() {
               Ca bonurile din POS-ul web să ajungă la casa asta, stația trebuie legată o singură dată de contul restaurantului.
             </p>
 
-            {enrolled && !confirmRelink ? (
+            {revoked ? (
+              <ProblemBox
+                e={{
+                  title: REVOKED_TEXT,
+                  checks: [
+                    'Cineva a apăsat „Deconectează” în admin, sau stația a fost legată din nou de altundeva.',
+                    'În admin: Restaurant → Fiscal → Casa de marcat → Activează, apoi Copiază codul.',
+                    'Lipește codul nou mai jos și apasă „Leagă”.',
+                  ],
+                }}
+              />
+            ) : null}
+            {enrolled && !confirmRelink && !revoked ? (
               <div className="space-y-3">
                 <OkBox>
                   <div className="font-semibold">
@@ -742,7 +815,7 @@ export function FiscalGuide() {
                   <Link2 className="h-4 w-4" /> Leagă din nou
                 </button>
               </div>
-            ) : enrolled && confirmRelink ? (
+            ) : enrolled && confirmRelink && !revoked ? (
               <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-sm text-amber-100">
                 <div className="font-semibold">Legi stația din nou?</div>
                 <p>
@@ -832,6 +905,86 @@ export function FiscalGuide() {
             <Result o={xrep} />
           </div>
         </StepCard>
+      )}
+
+      {/* ======== Rapoarte fiscale (only from this app, never from the web) ======== */}
+      {loaded && (
+        <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+          <h3 className="text-base font-semibold text-slate-100">Rapoarte fiscale</h3>
+          <p className="text-sm text-slate-400">
+            Rapoartele X și Z se dau doar de aici, de pe calculatorul cu casa de marcat.
+          </p>
+          {!tillConfigured && <p className="text-sm text-amber-300">Mai întâi fă pasul 1, ca să știu pe ce casă tipăresc.</p>}
+          <div className="flex flex-wrap gap-2">
+            <button className={btnSecondary} onClick={() => void printX()} disabled={xrep.state === 'busy' || !tillConfigured}>
+              {xrep.state === 'busy' ? <Spinner /> : <Printer className="h-4 w-4" />} Raport X (nu închide ziua)
+            </button>
+            <button
+              className="inline-flex items-center gap-2 rounded-lg border border-rose-500/50 bg-rose-950/40 px-4 py-2 text-sm font-semibold text-rose-100 hover:bg-rose-900/50 disabled:opacity-50"
+              onClick={() => setZStep(1)}
+              disabled={zrep.state === 'busy' || !tillConfigured || zStep !== 0}
+            >
+              {zrep.state === 'busy' ? <Spinner /> : <Printer className="h-4 w-4" />} Raport Z (închide ziua)
+            </button>
+          </div>
+          {zStep === 1 && (
+            <div className="space-y-3 rounded-lg border border-rose-500/40 bg-rose-950/40 p-3 text-sm text-rose-100">
+              <div className="font-semibold">Închide ziua fiscală — nu se poate anula</div>
+              <p>Raportul Z închide ziua pe casa de marcat și se trimite la ANAF. Se dă o singură dată pe zi, la final.</p>
+              <div className="flex flex-wrap gap-2">
+                <button className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500" onClick={() => setZStep(2)}>
+                  Da, vreau să închid ziua
+                </button>
+                <button className={btnSecondary} onClick={() => setZStep(0)}>
+                  Renunță
+                </button>
+              </div>
+            </div>
+          )}
+          {zStep === 2 && (
+            <div className="space-y-3 rounded-lg border border-rose-500/60 bg-rose-950/60 p-3 text-sm text-rose-100">
+              <div className="font-semibold">Ești sigur? Închide ziua fiscală — nu se poate anula.</div>
+              <p>Apasă „Tipărește raportul Z” doar dacă ai terminat toate bonurile de azi.</p>
+              <div className="flex flex-wrap gap-2">
+                <button className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500" onClick={() => void printZ()}>
+                  Tipărește raportul Z
+                </button>
+                <button className={btnSecondary} onClick={() => setZStep(0)}>
+                  Renunță
+                </button>
+              </div>
+            </div>
+          )}
+          <Result o={xrep} />
+          <Result o={zrep} />
+        </section>
+      )}
+
+      {/* ======== Ajutor: diagnostic + jurnale ======== */}
+      {loaded && (
+        <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+          <h3 className="text-base font-semibold text-slate-100">Ajutor</h3>
+          <p className="text-sm text-slate-400">
+            Dacă ceva nu merge, apasă „Copiază diagnosticul” și lipește textul în mesajul către 360booking.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button className={btnSecondary} onClick={() => void copyDiagnostics()} disabled={diag.state === 'busy'}>
+              {diag.state === 'busy' ? <Spinner /> : <ClipboardCopy className="h-4 w-4" />} Copiază diagnosticul
+            </button>
+            <button className={btnGhost} onClick={() => void openLogs()}>
+              <FolderOpen className="h-4 w-4" /> Deschide folderul de jurnale
+            </button>
+          </div>
+          <Result o={diag} />
+          {diagText ? (
+            <textarea
+              readOnly
+              className={`${inputCls} h-48 font-mono text-xs`}
+              value={diagText}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+          ) : null}
+        </section>
       )}
 
       {/* ======== Avansat (service) ======== */}

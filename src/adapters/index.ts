@@ -5,9 +5,13 @@
  * implementation can be swapped via config (`fiscalAdapter: 'simulator' | 'datecs'`).
  *
  * Sprint 11 (fiscal port): `RustFiscalAdapter` calls into the Rust providers
- * via Tauri commands and is gated on `FISCAL_USE_RUST=true` (resolved via the
- * `fiscal_use_rust_enabled` command, falsy outside Tauri).  The JS-side
- * `SimulatorFiscalAdapter` stays as the default + browser/CI fallback.
+ * via Tauri commands.
+ *
+ * 2026-10-14 („o singură cale”): inside the desktop app the fiscal adapter is
+ * ALWAYS the Rust one — never the JS simulator, whatever `use_rust` says. The
+ * Rust side refuses the simulator / an unconfigured station with a clear
+ * Romanian error, so nothing here can answer "printed" without a register.
+ * The JS `SimulatorFiscalAdapter` is left only for the browser (vite dev, CI).
  */
 import type { FiscalDeviceAdapter } from './fiscal/types';
 import type { PaymentTerminalAdapter } from './payment/types';
@@ -19,6 +23,10 @@ import { SimulatorPrinterAdapter } from './printer/simulator';
 import type { AppConfig } from '@/lib/config';
 
 let _fiscal: FiscalDeviceAdapter | null = null;
+
+function inTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
 let _payment: PaymentTerminalAdapter | null = null;
 let _printer: ReceiptPrinterAdapter | null = null;
 
@@ -30,7 +38,7 @@ export function configureAdapters(config: AppConfig): void {
     case 'datecs':
     case 'simulator':
     default:
-      _fiscal = new SimulatorFiscalAdapter();
+      _fiscal = inTauri() ? new RustFiscalAdapter() : new SimulatorFiscalAdapter();
       break;
   }
   switch (config.paymentAdapter) {
@@ -53,6 +61,10 @@ export function configureAdapters(config: AppConfig): void {
  *  Idempotent. Safe to call from non-Tauri (returns false there). */
 export async function enableRustFiscalIfAllowed(): Promise<boolean> {
   if (_fiscal instanceof RustFiscalAdapter) return true;
+  if (inTauri()) {
+    _fiscal = new RustFiscalAdapter();
+    return true;
+  }
   const enabled = await rustFiscalEnabled();
   if (!enabled) return false;
   _fiscal = new RustFiscalAdapter();

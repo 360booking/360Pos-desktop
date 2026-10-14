@@ -51,6 +51,8 @@ export interface AgentSummary {
   connected: boolean;
   bridgeId: string | null;
   lastError: string | null;
+  /** The server refused this station's token ("Deconectează" in the admin). */
+  revoked?: boolean;
 }
 
 export interface JournalCounts {
@@ -148,6 +150,17 @@ export const shellApi = {
   fiscalReconnect: () => invoke<{ printer: FiscalHealth; agent: AgentSummary }>('shell_fiscal_reconnect'),
   printXReport: () =>
     invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>('fiscal_print_x_report'),
+  /** Z closes the fiscal day: a single-use token from `requestZConfirm`
+   *  (valid 30 s) must accompany it. */
+  requestZConfirm: () => invoke<string>('fiscal_request_z_confirm'),
+  printZReport: (confirmToken: string) =>
+    invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>('fiscal_print_z_report', {
+      confirmToken,
+    }),
+  /** Plain-text report: version, settings, agent state, last ~200 log lines. */
+  diagnostics: () => invoke<string>('fiscal_diagnostics'),
+  /** Opens the log folder in Explorer; resolves to its path. */
+  openLogDir: () => invoke<string>('fiscal_open_log_dir'),
 };
 
 export const offlineApi = {

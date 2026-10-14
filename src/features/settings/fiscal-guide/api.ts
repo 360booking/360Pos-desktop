@@ -38,6 +38,8 @@ export interface BridgeState {
   last_heartbeat_at: number | null;
   last_error: string | null;
   close_code: number | null;
+  /** Server refused the token (admin „Deconectează” / newer enrolment). */
+  revoked?: boolean;
 }
 
 export const DEFAULT_SERVER = 'https://360booking.ro';
