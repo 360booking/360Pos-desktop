@@ -12,6 +12,12 @@ pub enum FiscalError {
     ConfigurationError { detail: String },
     UnknownFiscalError { detail: String },
     Other { detail: String },
+    /// The register answered the frame but refused the command: the DP-25X
+    /// `ErrorCode` (first answer field) was negative. `message` is the
+    /// complete Romanian text for the operator (it already ends with the
+    /// code), so `Display` prints it as-is — that string is what the guide,
+    /// „Avansat”, the offline till and the server's job_result receive.
+    Device { code: i64, message: String },
 }
 
 impl std::fmt::Display for FiscalError {
@@ -26,6 +32,7 @@ impl std::fmt::Display for FiscalError {
             FiscalError::ConfigurationError { detail } => write!(f, "configuration error: {detail}"),
             FiscalError::UnknownFiscalError { detail } => write!(f, "unknown fiscal error: {detail}"),
             FiscalError::Other { detail } => write!(f, "other: {detail}"),
+            FiscalError::Device { message, .. } => write!(f, "{message}"),
         }
     }
 }

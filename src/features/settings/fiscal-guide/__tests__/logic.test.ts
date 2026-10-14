@@ -275,6 +275,32 @@ describe('error messages', () => {
     for (const [raw] of cases) expect(explainFiscalError(raw).checks.length).toBeGreaterThan(0);
   });
 
+  it('surfaces the register refusal from the Rust driver (DP-25X ErrorCode)', () => {
+    const z =
+      'Casa a refuzat bonul: Este necesar raportul Z (au trecut 24 de ore). ' +
+      'Fă raportul Z de la casă sau din Rapoarte fiscale → Z, apoi încearcă din nou. (cod -111024)';
+    expect(explainFiscalError(z)).toEqual({
+      title: 'Casa a refuzat bonul: Este necesar raportul Z (au trecut 24 de ore).',
+      checks: ['Fă raportul Z de la casă sau din Rapoarte fiscale → Z, apoi încearcă din nou.'],
+    });
+    const x =
+      'Casa a refuzat raportul X: Comanda are parametri pe care casa nu îi acceptă (eroare de sintaxă). ' +
+      'Trimite-ne diagnosticul din „Avansat (service)”: casa așteaptă alt format. (cod -112001)';
+    expect(explainFiscalError(x).title).toBe(
+      'Casa a refuzat raportul X: Comanda are parametri pe care casa nu îi acceptă (eroare de sintaxă).',
+    );
+    expect(explainFiscalError(x).checks[0]).toMatch(/Avansat \(service\)/);
+    // A refusal is never shown as the generic "casa nu a răspuns".
+    const unknown = explainFiscalError('Casa a refuzat bonul (cod -100999).');
+    expect(unknown.title).toBe('Casa a refuzat bonul (cod -100999).');
+    expect(unknown.checks.length).toBeGreaterThan(0);
+    // Paper end decoded from the status bytes still reads as a paper problem.
+    const paper = explainFiscalError(
+      'Casa a refuzat bonul: Casa nu mai are hârtie. Pune o rolă nouă, închide capacul și încearcă din nou. (cod -100999)',
+    );
+    expect(paper.title).toMatch(/hârtie/);
+  });
+
   it('explains enrolment failures', () => {
     expect(explainClaimError('configuration error: enrollment code expired: {"detail":"Enrollment code expired"}').title).toMatch(/expirat/);
     expect(explainClaimError('configuration error: enrollment code not found: x').title).toMatch(/nu e bun/);

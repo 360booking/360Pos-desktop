@@ -340,9 +340,36 @@ export interface Explained {
   checks: string[];
 }
 
+/**
+ * „Casa a refuzat …” — the register answered but refused the command
+ * (DP-25X ErrorCode < 0). The Rust driver writes the whole Romanian text:
+ *   `Casa a refuzat <ce>: <motiv>. <ce faci> (cod -NNN)`   (cod cunoscut)
+ *   `Casa a refuzat <ce> (cod -NNN).`                      (cod necunoscut)
+ * so the guide only splits it; the table lives in
+ * src-tauri/src/fiscal/mapping/datecs_errors.rs.
+ */
+export function explainDeviceRefusal(raw: unknown): Explained | null {
+  const text = String(raw ?? '');
+  const m = /Casa a refuzat ([^:(]+?)(?:: ([^.]+)\. ([\s\S]*?))? \(cod (-?\d+)\)/.exec(text);
+  if (!m) return null;
+  const [, what, reason, hint, code] = m;
+  if (reason) {
+    return { title: `Casa a refuzat ${what}: ${reason}.`, checks: [hint.trim() || 'Încearcă din nou.'] };
+  }
+  return {
+    title: `Casa a refuzat ${what} (cod ${code}).`,
+    checks: [
+      'Uită-te pe ecranul casei: un mesaj, un meniu sau un bon rămas deschis explică de obicei refuzul.',
+      'Dacă se repetă, trimite-ne textul de mai jos (conține codul erorii).',
+    ],
+  };
+}
+
 /** Plain-Romanian reason + what to check, for any till error string. */
 export function explainFiscalError(raw: unknown): Explained {
   const text = String(raw ?? '');
+  const refused = explainDeviceRefusal(text);
+  if (refused) return refused;
   const t = text.toLowerCase();
   if (/port serial (lipsește|neconfigurat)|serial port.*missing/.test(t)) {
     return { title: 'Nu e ales portul casei.', checks: ['Apasă „Caută casa automat” sau alege portul de mână.'] };

@@ -10,7 +10,50 @@ use crate::fiscal::dto::{
 use crate::fiscal::error::FiscalError;
 use crate::fiscal::mapping::{datecs_errors, payment, status as status_dec, vat};
 use crate::fiscal::provider::FiscalPrinterProvider;
-use crate::fiscal::transport::datecs_fp::{DatecsFpTransport, DatecsTransportConfig};
+use crate::fiscal::transport::datecs_fp::{
+    parse_error_code, reply_fields, reply_status_bytes, DatecsFpTransport, DatecsTransportConfig,
+    FrameResponse,
+};
+
+/// What the operator is told was refused (Romanian, with article).
+const ACT_RECEIPT: &str = "bonul";
+const ACT_STORNO: &str = "bonul de stornare";
+const ACT_X: &str = "raportul X";
+const ACT_Z: &str = "raportul Z";
+const ACT_DRAWER: &str = "deschiderea sertarului";
+const ACT_REPRINT: &str = "duplicatul bonului";
+const ACT_PERIODIC: &str = "raportul periodic";
+const ACT_STATUS: &str = "citirea stării";
+
+/// Turn a framed reply into an error when the register refused the command
+/// (DP-25X ErrorCode < 0). A reply without an ErrorCode (legacy dialect,
+/// empty DATA) passes — the legacy `ER:NN` text check stays where it was.
+fn check_reply(reply: FrameResponse, action: &str, opening: bool) -> Result<FrameResponse, FiscalError> {
+    match parse_error_code(&reply.data) {
+        Some(code) if code < 0 => {
+            let err = datecs_errors::device_error(
+                code,
+                action,
+                reply_status_bytes(&reply.data),
+                opening,
+            );
+            log::warn!(
+                "Datecs DP-25 refused cmd=0x{:02X} ({action}): code {code} → {err}",
+                reply.cmd
+            );
+            Err(err)
+        }
+        _ => Ok(reply),
+    }
+}
+
+/// Answer field `idx` (0 = ErrorCode), if present and non-empty.
+fn reply_field(reply: &FrameResponse, idx: usize) -> Option<String> {
+    reply_fields(&reply.data)
+        .into_iter()
+        .nth(idx)
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Debug, Clone)]
 pub struct DatecsConfig {
@@ -50,6 +93,11 @@ pub struct CmdCodes {
     /// Print a periodic-memory report between two dates. 0x4F on FP-55.
     /// Payload is `<from>\t<to>` with dates DDMMYY (no separators).
     pub periodic_memory: u16,
+    /// Cancel (void) the fiscal receipt that is open right now — 0x3C
+    /// "Cancel fiscal receipt" (no parameters) on DP-25X / FP-700X and on
+    /// the older FP-55/FP-700 protocol alike. Sent when a step fails after
+    /// the receipt was opened, so the register is not left with a half bon.
+    pub void_open_receipt: u16,
 }
 
 impl Default for CmdCodes {
@@ -72,6 +120,7 @@ impl Default for CmdCodes {
             open_drawer: 0x6A,
             reprint_last: 0x6D,
             periodic_memory: 0x4F,
+            void_open_receipt: 0x3C,
         }
     }
 }
@@ -237,12 +286,178 @@ impl DatecsDp25Provider {
     /// `fmt_amount` strips signs anyway, so this is a pass-through. Kept
     /// as a separate helper for the call-site clarity (and to give us a
     /// single hook if firmware variants ever require a different shape).
+    #[allow(dead_code)] // storno lines go through sell_after_open → build_register_item today
     fn build_cancel_item(item: &ReceiptItem) -> Vec<u8> {
         Self::build_register_item(item)
     }
 
     fn build_print_text(text: &str) -> Vec<u8> {
         Self::cp1250(&Self::truncate(text, 36))
+    }
+}
+
+impl DatecsDp25Provider {
+    /// DP-25X / DP-150X / FP-700X protocol ("X dialect": 4-nibble CMD,
+    /// TAB-separated parameters each followed by <SEP>, ErrorCode first in
+    /// every answer). Everything except the explicit `fp700` legacy variant.
+    fn x_dialect(&self) -> bool {
+        !self.cfg.variant_fp700
+    }
+
+    /// Command 0x45 parameter. X dialect: `{ReportType}<SEP>` with 'X' / 'Z'
+    /// (Programmer's Manual FMP-350X/FMP-55X/FP-700X/DP-25X, cmd 69 (45h);
+    /// ErpNet.FP BgDatecsXIslFiscalPrinter.PrintDailyReport sends "X\t" /
+    /// "Z\t"). The owner's DP-25X answered "0" with -112001 (syntax).
+    /// The legacy `fp700` variant keeps the old "0" (X) / "1" (Z) subcommand.
+    fn report_payload(&self, z: bool) -> &'static [u8] {
+        match (self.x_dialect(), z) {
+            (true, false) => &b"X\t"[..],
+            (true, true) => &b"Z\t"[..],
+            (false, false) => &b"0"[..],
+            (false, true) => &b"1"[..],
+        }
+    }
+
+    /// Drawer 0x6A. X dialect: `{mSec}<SEP>` — optional, "can be left blank
+    /// but separator must exist" (manual §general syntax) → "\t" = default
+    /// pulse. Legacy: empty body as before.
+    fn drawer_payload(&self) -> &'static [u8] {
+        if self.x_dialect() {
+            &b"\t"[..]
+        } else {
+            &b""[..]
+        }
+    }
+
+    /// Execute one command and fail on a refusal (ErrorCode < 0).
+    fn exec(
+        &self,
+        t: &mut DatecsFpTransport,
+        cmd: u16,
+        data: &[u8],
+        action: &str,
+        opening: bool,
+    ) -> Result<FrameResponse, FiscalError> {
+        let reply = t.execute(cmd, data)?;
+        check_reply(reply, action, opening)
+    }
+
+    /// Best effort: void the receipt left open by a failed step. Its own
+    /// outcome is only logged — the caller returns the ORIGINAL error.
+    fn void_open_receipt(&self, t: &mut DatecsFpTransport) {
+        match t.execute(self.cfg.cmd_codes.void_open_receipt, b"") {
+            Ok(r) => match parse_error_code(&r.data) {
+                Some(code) if code < 0 => {
+                    log::warn!("Datecs DP-25: cancel of the open receipt refused (code {code})")
+                }
+                _ => log::info!("Datecs DP-25: open receipt cancelled after a failed step"),
+            },
+            Err(e) => log::warn!("Datecs DP-25: cancel of the open receipt failed: {e}"),
+        }
+    }
+
+    /// Payments for a receipt: as sent, or one cash payment for the total.
+    fn payments_or_cash(items: &[ReceiptItem], payments: &[ReceiptPayment]) -> Vec<ReceiptPayment> {
+        if payments.is_empty() {
+            let total: f64 = items.iter().map(|i| i.unit_price * i.quantity.abs()).sum();
+            vec![ReceiptPayment {
+                method: crate::fiscal::dto::PaymentMethod::Cash,
+                amount: total,
+            }]
+        } else {
+            payments.to_vec()
+        }
+    }
+
+    /// Steps after a successful open: items, (subtotal), payments, close.
+    /// Returns the close reply. `reason` is the storno text line, if any.
+    fn sell_after_open(
+        &self,
+        t: &mut DatecsFpTransport,
+        items: &[ReceiptItem],
+        payments: &[ReceiptPayment],
+        reason: Option<&str>,
+        action: &str,
+    ) -> Result<FrameResponse, FiscalError> {
+        let c = &self.cfg.cmd_codes;
+        for item in items {
+            let data = Self::build_register_item(item);
+            self.exec(t, c.register_item, &data, action, false)?;
+        }
+        if let Some(text) = reason {
+            let line = Self::build_print_text(text);
+            self.exec(t, c.print_text, &line, action, false)?;
+        }
+        // Subtotal is optional before payment. The X dialect wants
+        // `{Print}<SEP>{Display}<SEP>{DiscountType}<SEP>{DiscountValue}<SEP>`
+        // and refused our empty body with -112001; ErpNet.FP never sends it
+        // for a plain receipt, so the X dialect skips it. Legacy: as before.
+        if !self.x_dialect() {
+            self.exec(t, c.subtotal, b"", action, false)?;
+        }
+        for p in Self::payments_or_cash(items, payments) {
+            let data = Self::build_payment(&p);
+            self.exec(t, c.payment, &data, action, false)?;
+        }
+        self.exec(t, c.close_fiscal, b"", action, false)
+    }
+
+    /// The fiscal number to report for a closed receipt. X dialect: the
+    /// close answer is `{ErrorCode}<SEP>{SlipNumber}<SEP>` (open answers the
+    /// same) → field 1 of close, else of open. Legacy: the whole DATA text,
+    /// as before.
+    fn fiscal_number(&self, open: &FrameResponse, close: &FrameResponse) -> Option<String> {
+        if self.x_dialect() {
+            reply_field(close, 1).or_else(|| reply_field(open, 1))
+        } else {
+            let body = String::from_utf8_lossy(&close.data).trim().to_string();
+            Some(body)
+        }
+    }
+
+    /// One whole fiscal document: open → (stop on refusal) → lines →
+    /// payments → close; any failure after the open voids the receipt (0x3C)
+    /// and returns the original error.
+    #[allow(clippy::too_many_arguments)]
+    fn run_document(
+        &self,
+        t: &mut DatecsFpTransport,
+        open_cmd: u16,
+        open_payload: &[u8],
+        items: &[ReceiptItem],
+        payments: &[ReceiptPayment],
+        reason: Option<&str>,
+        action: &str,
+    ) -> Result<(FrameResponse, FrameResponse), FiscalError> {
+        // A refused open leaves nothing on the register: stop, send no items.
+        let open = self.exec(t, open_cmd, open_payload, action, true)?;
+        match self.sell_after_open(t, items, payments, reason, action) {
+            Ok(close) => {
+                // Legacy FP-55 `ER:NN` text marker, kept from the old path.
+                let body = String::from_utf8_lossy(&close.data).trim().to_string();
+                if let Some(err) = datecs_errors::try_map_response_text(&body) {
+                    self.void_open_receipt(t);
+                    return Err(err);
+                }
+                Ok((open, close))
+            }
+            Err(e) => {
+                self.void_open_receipt(t);
+                Err(e)
+            }
+        }
+    }
+
+    fn report_response(kind: &str, reply: &FrameResponse) -> ReceiptResponse {
+        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
+        ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: None,
+            fiscal_date: Some(now_iso()),
+            raw_trace: format!("datecs_dp25 {kind} cmd=0x{:02X} bytes={}", reply.cmd, dump),
+            error_code: None,
+            error_message: None,
+        }
     }
 }
 
@@ -254,8 +469,9 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
     fn test_connection(&self) -> Result<TestResult, FiscalError> {
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let r = t.execute(self.cfg.cmd_codes.status, b"")?;
+        let r = self.exec(&mut t, self.cfg.cmd_codes.status, b"", ACT_STATUS, false);
         t.close();
+        let r = r?;
         Ok(TestResult {
             ok: true,
             detail: format!("status reply: cmd=0x{:02X} data_len={}", r.cmd, r.data.len()),
@@ -265,9 +481,9 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
     fn get_status(&self) -> Result<FiscalStatus, FiscalError> {
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let r = t.execute(self.cfg.cmd_codes.status, b"")?;
+        let r = self.exec(&mut t, self.cfg.cmd_codes.status, b"", ACT_STATUS, false);
         t.close();
-        Ok(status_dec::decode_minimal(&r.status))
+        Ok(status_dec::decode_minimal(&r?.status))
     }
 
     fn print_receipt(&self, req: ReceiptRequest) -> Result<ReceiptResponse, FiscalError> {
@@ -279,56 +495,30 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
 
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-
-        // open_fiscal
-        let open = self.build_open_fiscal();
-        t.execute(self.cfg.cmd_codes.open_fiscal, &open)?;
-
-        // register_item per line
-        for item in &req.items {
-            let data = Self::build_register_item(item);
-            t.execute(self.cfg.cmd_codes.register_item, &data)?;
-        }
-
-        // subtotal (helps the print)
-        t.execute(self.cfg.cmd_codes.subtotal, b"")?;
-
-        // payments — fall back to single cash payment for the total
-        let payments_owned: Vec<ReceiptPayment>;
-        let payments: &[ReceiptPayment] = if req.payments.is_empty() {
-            let total: f64 = req
-                .items
-                .iter()
-                .map(|i| i.unit_price * i.quantity)
-                .sum();
-            payments_owned = vec![ReceiptPayment {
-                method: crate::fiscal::dto::PaymentMethod::Cash,
-                amount: total,
-            }];
-            &payments_owned
-        } else {
-            &req.payments
-        };
-        for p in payments {
-            let data = Self::build_payment(p);
-            t.execute(self.cfg.cmd_codes.payment, &data)?;
-        }
-
-        // close_fiscal returns BF number in DATA bytes
-        let reply = t.execute(self.cfg.cmd_codes.close_fiscal, b"")?;
+        let open_payload = self.build_open_fiscal();
+        let outcome = self.run_document(
+            &mut t,
+            self.cfg.cmd_codes.open_fiscal,
+            &open_payload,
+            &req.items,
+            &req.payments,
+            None,
+            ACT_RECEIPT,
+        );
         t.close();
-        let body = String::from_utf8_lossy(&reply.data).trim().to_string();
-        if let Some(err) = datecs_errors::try_map_response_text(&body) {
-            return Err(err);
-        }
+        let (open, close) = outcome?;
+        let bf = self.fiscal_number(&open, &close);
 
         Ok(ReceiptResponse {
             status: ReceiptStatus::Printed,
-            fiscal_number: Some(body.clone()),
+            fiscal_number: bf.clone(),
             fiscal_date: Some(now_iso()),
             raw_trace: format!(
                 "datecs_dp25 mut={} order={} attempt={} bf={}",
-                req.mutation_id, req.order_local_id, req.fiscal_attempt_id, body
+                req.mutation_id,
+                req.order_local_id,
+                req.fiscal_attempt_id,
+                bf.as_deref().unwrap_or("")
             ),
             error_code: None,
             error_message: None,
@@ -344,62 +534,36 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
 
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-
-        // open storno fiscal
-        let open = self.build_cancel_open(&req);
-        t.execute(self.cfg.cmd_codes.cancel_fiscal, &open)?;
-
-        // re-register items with negative quantity
-        for item in &req.items {
-            let data = Self::build_cancel_item(item);
-            t.execute(self.cfg.cmd_codes.register_item, &data)?;
-        }
-
-        // print storno reason as a free-text line so the customer/auditor
-        // sees the justification directly on the receipt.
-        if !req.reason.trim().is_empty() {
-            let reason = Self::build_print_text(req.reason.as_str());
-            t.execute(self.cfg.cmd_codes.print_text, &reason)?;
-        }
-
-        t.execute(self.cfg.cmd_codes.subtotal, b"")?;
-
-        // payments — same shape as print_receipt; if missing fall back to
-        // single cash matching the negative total.
-        let payments_owned: Vec<ReceiptPayment>;
-        let payments: &[ReceiptPayment] = if req.payments.is_empty() {
-            let total: f64 = req
-                .items
-                .iter()
-                .map(|i| i.unit_price * i.quantity.abs())
-                .sum();
-            payments_owned = vec![ReceiptPayment {
-                method: crate::fiscal::dto::PaymentMethod::Cash,
-                amount: total,
-            }];
-            &payments_owned
+        let open_payload = self.build_cancel_open(&req);
+        // Storno reason as a free-text line so the auditor sees it.
+        let reason = if req.reason.trim().is_empty() {
+            None
         } else {
-            &req.payments
+            Some(req.reason.as_str())
         };
-        for p in payments {
-            let data = Self::build_payment(p);
-            t.execute(self.cfg.cmd_codes.payment, &data)?;
-        }
-
-        let reply = t.execute(self.cfg.cmd_codes.close_fiscal, b"")?;
+        let outcome = self.run_document(
+            &mut t,
+            self.cfg.cmd_codes.cancel_fiscal,
+            &open_payload,
+            &req.items,
+            &req.payments,
+            reason,
+            ACT_STORNO,
+        );
         t.close();
-        let body = String::from_utf8_lossy(&reply.data).trim().to_string();
-        if let Some(err) = datecs_errors::try_map_response_text(&body) {
-            return Err(err);
-        }
+        let (open, close) = outcome?;
+        let bf = self.fiscal_number(&open, &close);
 
         Ok(ReceiptResponse {
             status: ReceiptStatus::Printed,
-            fiscal_number: Some(body.clone()),
+            fiscal_number: bf.clone(),
             fiscal_date: Some(now_iso()),
             raw_trace: format!(
                 "datecs_dp25 storno mut={} order={} original={} new_bf={}",
-                req.mutation_id, req.order_local_id, req.original_fiscal_number, body
+                req.mutation_id,
+                req.order_local_id,
+                req.original_fiscal_number,
+                bf.as_deref().unwrap_or("")
             ),
             error_code: None,
             error_message: None,
@@ -407,73 +571,42 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
     }
 
     fn print_z_report(&self, _confirm_token: &str) -> Result<ReceiptResponse, FiscalError> {
-        // Z-report (end of day, zeros the daily counters). Datecs FP-55/DP-25
-        // shares cmd 0x45 between X and Z; the subcommand byte selects:
-        //   "0" → X (readout, no reset)
-        //   "1" → Z (closes the day, resets counters)
-        // Verified against fiscal-bridge/bridge/printers/datecs_dp25.py:226.
+        // Z-report (closes the fiscal day). Cmd 0x45, payload per dialect —
+        // see report_payload().
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let reply = t.execute(self.cfg.cmd_codes.z_report, b"1")?;
+        let payload = self.report_payload(true);
+        let r = self.exec(&mut t, self.cfg.cmd_codes.z_report, payload, ACT_Z, false);
         t.close();
-        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
-        Ok(ReceiptResponse {
-            status: ReceiptStatus::Printed,
-            fiscal_number: None,
-            fiscal_date: Some(now_iso()),
-            raw_trace: format!("datecs_dp25 z_report cmd=0x{:02X} bytes={}", reply.cmd, dump),
-            error_code: None,
-            error_message: None,
-        })
+        Ok(Self::report_response("z_report", &r?))
     }
 
     fn print_x_report(&self) -> Result<ReceiptResponse, FiscalError> {
-        // X-report — readout only, daily counters untouched. Cmd 0x45 with
-        // payload "0" (vs "1" for Z). Same source as print_z_report above.
+        // X-report — readout only, daily counters untouched.
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let reply = t.execute(self.cfg.cmd_codes.x_report, b"0")?;
+        let payload = self.report_payload(false);
+        let r = self.exec(&mut t, self.cfg.cmd_codes.x_report, payload, ACT_X, false);
         t.close();
-        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
-        Ok(ReceiptResponse {
-            status: ReceiptStatus::Printed,
-            fiscal_number: None,
-            fiscal_date: Some(now_iso()),
-            raw_trace: format!("datecs_dp25 x_report cmd=0x{:02X} bytes={}", reply.cmd, dump),
-            error_code: None,
-            error_message: None,
-        })
+        Ok(Self::report_response("x_report", &r?))
     }
 
     fn open_cash_drawer(&self) -> Result<(), FiscalError> {
-        // Drawer kick-out pulse. FP-55 cmd 0x6A with empty body fires the
-        // default pulse width (~50ms). Some firmwares accept "1" or "0\t0"
-        // payloads to choose pin / pulse width — left empty here, override
-        // via cmd_codes if a tenant ever needs different.
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let _ = t.execute(self.cfg.cmd_codes.open_drawer, b"")?;
+        let payload = self.drawer_payload();
+        let r = self.exec(&mut t, self.cfg.cmd_codes.open_drawer, payload, ACT_DRAWER, false);
         t.close();
-        Ok(())
+        r.map(|_| ())
     }
 
     fn reprint_last_receipt(&self) -> Result<ReceiptResponse, FiscalError> {
-        // FP-55 cmd 0x6D: print a labelled DUPLICATE of the last fiscal
-        // receipt. Body empty. Compliance: ROM regulation requires the
-        // header "COPIE" / "DUPLICATE" — Datecs firmware adds it itself.
+        // Cmd 0x6D: print a DUPLICATE of the last fiscal receipt. No params.
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let reply = t.execute(self.cfg.cmd_codes.reprint_last, b"")?;
+        let r = self.exec(&mut t, self.cfg.cmd_codes.reprint_last, b"", ACT_REPRINT, false);
         t.close();
-        let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
-        Ok(ReceiptResponse {
-            status: ReceiptStatus::Printed,
-            fiscal_number: None,
-            fiscal_date: Some(now_iso()),
-            raw_trace: format!("datecs_dp25 reprint_last cmd=0x{:02X} bytes={}", reply.cmd, dump),
-            error_code: None,
-            error_message: None,
-        })
+        Ok(Self::report_response("reprint_last", &r?))
     }
 
     fn print_periodic_memory(
@@ -483,9 +616,9 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
     ) -> Result<ReceiptResponse, FiscalError> {
         // Periodic memory readout between two dates. FP-55 cmd 0x4F with
         // payload `<from>\t<to>` where each date is DDMMYY (no separators).
-        // Caller is responsible for the date format — we don't reformat
-        // here so the provider stays stateless about Romanian/Bulgarian
-        // calendar quirks.
+        // NOTE: the X dialect documents this report as 0x5E
+        // `{Type}<SEP>{Start}<SEP>{End}<SEP>` (DD-MM-YY) — not switched here
+        // (unverified on the register); a refusal now surfaces as an error.
         if date_from.is_empty() || date_to.is_empty() {
             return Err(FiscalError::InvalidCommand {
                 detail: "periodic_memory: date_from and date_to are required".into(),
@@ -494,8 +627,15 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
         let payload = format!("{date_from}\t{date_to}");
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let reply = t.execute(self.cfg.cmd_codes.periodic_memory, payload.as_bytes())?;
+        let r = self.exec(
+            &mut t,
+            self.cfg.cmd_codes.periodic_memory,
+            payload.as_bytes(),
+            ACT_PERIODIC,
+            false,
+        );
         t.close();
+        let reply = r?;
         let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
         Ok(ReceiptResponse {
             status: ReceiptStatus::Printed,
@@ -630,5 +770,81 @@ mod tests {
             method: PaymentMethod::Card, amount: 5.0,
         });
         assert_eq!(String::from_utf8_lossy(&card), "2\t5.00\t");
+    }
+
+    fn provider(variant_fp700: bool) -> DatecsDp25Provider {
+        DatecsDp25Provider::new(DatecsConfig {
+            serial_port: "COMx".into(), baud: 115200,
+            operator: "1".into(), operator_password: "0001".into(),
+            variant_fp700, cmd_codes: CmdCodes::default(),
+        })
+    }
+
+    const OWNER_STATUS: [u8; 8] = [0x80, 0x84, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80];
+
+    /// DATA of a DP-25X reply: `<fields>` + 0x04 + the 8 status bytes the
+    /// owner's register sent (2026-10-14 log).
+    fn reply(cmd: u16, fields: &str) -> FrameResponse {
+        let mut data = fields.as_bytes().to_vec();
+        data.push(0x04);
+        data.extend_from_slice(&OWNER_STATUS);
+        FrameResponse { cmd, data, status: [0u8; 6], raw: Vec::new() }
+    }
+
+    #[test]
+    fn owner_capture_replies_are_refusals() {
+        // open_fiscal 0x30 → -111024, then items/payment/close → -111016,
+        // subtotal and X report "0" → -112001 (owner's DP-25X, DEBUG log).
+        let e = check_reply(reply(0x30, "-111024\t"), ACT_RECEIPT, true).unwrap_err();
+        assert!(matches!(e, FiscalError::Device { code: -111024, .. }));
+        assert!(e.to_string().starts_with("Casa a refuzat bonul: Este necesar raportul Z"));
+        for cmd in [0x31u16, 0x35, 0x38] {
+            let e = check_reply(reply(cmd, "-111016\t"), ACT_RECEIPT, false).unwrap_err();
+            assert!(matches!(e, FiscalError::Device { code: -111016, .. }));
+        }
+        let e = check_reply(reply(0x45, "-112001\t"), ACT_X, false).unwrap_err();
+        assert!(matches!(e, FiscalError::Device { code: -112001, .. }));
+        assert!(e.to_string().starts_with("Casa a refuzat raportul X:"));
+    }
+
+    #[test]
+    fn ok_replies_pass() {
+        assert!(check_reply(reply(0x4A, "0\t"), ACT_STATUS, false).is_ok());
+        assert!(check_reply(reply(0x30, "0\t000045\t"), ACT_RECEIPT, true).is_ok());
+        // No ErrorCode at all (legacy dialect / empty DATA) is not a refusal.
+        let legacy = FrameResponse { cmd: 0x38, data: b"1234,56".to_vec(), status: [0u8; 6], raw: Vec::new() };
+        assert!(check_reply(legacy, ACT_RECEIPT, false).is_ok());
+    }
+
+    #[test]
+    fn fiscal_number_comes_from_close_reply() {
+        let p = provider(false);
+        let open = reply(0x30, "0\t000045\t");
+        let close = reply(0x38, "0\t000046\t");
+        assert_eq!(p.fiscal_number(&open, &close).as_deref(), Some("000046"));
+        // Close without a slip number → fall back to the open answer.
+        let bare = reply(0x38, "0\t");
+        assert_eq!(p.fiscal_number(&open, &bare).as_deref(), Some("000045"));
+    }
+
+    #[test]
+    fn xz_report_payload_depends_on_dialect() {
+        let x = provider(false);
+        assert_eq!(x.report_payload(false), b"X\t");
+        assert_eq!(x.report_payload(true), b"Z\t");
+        let legacy = provider(true);
+        assert_eq!(legacy.report_payload(false), b"0");
+        assert_eq!(legacy.report_payload(true), b"1");
+    }
+
+    #[test]
+    fn drawer_payload_keeps_separator_on_x_dialect() {
+        assert_eq!(provider(false).drawer_payload(), b"\t");
+        assert_eq!(provider(true).drawer_payload(), b"");
+    }
+
+    #[test]
+    fn cancel_open_receipt_is_0x3c() {
+        assert_eq!(CmdCodes::default().void_open_receipt, 0x3C);
     }
 }

@@ -301,6 +301,50 @@ impl DatecsFpTransport {
     }
 }
 
+/// Separator between the answer fields and the 8 status bytes inside the
+/// DATA of a DP-25X / FP-700X reply:
+///   `{ErrorCode}\t{Field1}\t…\t` 0x04 `S0..S7`
+/// (Datecs FMP-350X/FMP-55X/FP-700X/DP-25X Programmer's Manual: "Answer
+/// when command fail to execute: {ErrorCode}<SEP>"; ErrorCode is 0 when the
+/// command passed, a negative number otherwise.)
+pub const STATUS_SEP: u8 = 0x04;
+
+/// TAB-separated answer fields of a reply (everything before the 0x04
+/// status separator), trimmed. The trailing `<SEP>` the firmware always
+/// appends is dropped, so `b"0\t123\t"` → `["0", "123"]`. The fields are
+/// plain ASCII (codes, numbers), so a lossy UTF-8 decode is enough.
+pub fn reply_fields(data: &[u8]) -> Vec<String> {
+    let end = data
+        .iter()
+        .position(|b| *b == STATUS_SEP)
+        .unwrap_or(data.len());
+    let text = String::from_utf8_lossy(&data[..end]);
+    let mut fields: Vec<String> = text.split('\t').map(|s| s.trim().to_string()).collect();
+    if fields.len() > 1 && fields.last().map(|s| s.is_empty()).unwrap_or(false) {
+        fields.pop();
+    }
+    fields
+}
+
+/// The DP-25X `ErrorCode` — the first answer field. `Some(0)` = OK,
+/// `Some(negative)` = the register refused the command. `None` when the
+/// first field is not an integer (empty DATA, or a legacy FP-55 / FP-700
+/// reply such as `1234,56` that carries no error code).
+pub fn parse_error_code(data: &[u8]) -> Option<i64> {
+    let fields = reply_fields(data);
+    let first = fields.first()?;
+    first.parse::<i64>().ok()
+}
+
+/// The status bytes that follow the 0x04 separator (8 on DP-25X); empty
+/// when the reply has none.
+pub fn reply_status_bytes(data: &[u8]) -> &[u8] {
+    match data.iter().position(|b| *b == STATUS_SEP) {
+        Some(i) => &data[i + 1..],
+        None => &[],
+    }
+}
+
 fn encode_4nibbles(value: u16, offset: u8) -> [u8; 4] {
     [
         (((value >> 12) & 0xF) as u8) + offset,
@@ -407,6 +451,67 @@ mod tests {
             ],
             "DP-25X STATUS frame must match DUDE capture byte-for-byte"
         );
+    }
+
+    /// Reply captured on the owner's DP-25X (2026-10-14, app log, DEBUG) for
+    /// open_fiscal: raw (between STX and ETX)
+    ///   `003; 0030-111024` 09 04 80 84 80 80 86 9a 80 80 05 <BCC>
+    /// The DATA handed to the provider is everything after CMD up to POST.
+    fn owner_open_fiscal_raw() -> Vec<u8> {
+        let mut raw = b"003; 0030-111024".to_vec();
+        raw.push(0x09);
+        raw.extend_from_slice(&[0x04, 0x80, 0x84, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80]);
+        raw.push(0x05);
+        raw.extend_from_slice(b"0000"); // BCC placeholder (not checked by the parser)
+        raw
+    }
+
+    fn data_of(raw: &[u8]) -> Vec<u8> {
+        // Same slicing as execute(): after LEN(4)+SEQ(1)+CMD(4) up to POST.
+        let post = raw[9..].iter().position(|b| *b == POST).unwrap() + 9;
+        raw[9..post].to_vec()
+    }
+
+    #[test]
+    fn owner_capture_open_fiscal_is_error_111024() {
+        let data = data_of(&owner_open_fiscal_raw());
+        assert_eq!(parse_error_code(&data), Some(-111024));
+        assert_eq!(reply_fields(&data), vec!["-111024".to_string()]);
+        assert_eq!(
+            reply_status_bytes(&data),
+            &[0x80, 0x84, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80]
+        );
+    }
+
+    #[test]
+    fn owner_capture_other_error_codes() {
+        let mk = |code: &str| {
+            let mut d = code.as_bytes().to_vec();
+            d.push(0x09);
+            d.extend_from_slice(&[0x04, 0x80, 0x80, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80]);
+            d
+        };
+        assert_eq!(parse_error_code(&mk("-111016")), Some(-111016));
+        assert_eq!(parse_error_code(&mk("-112001")), Some(-112001));
+    }
+
+    #[test]
+    fn ok_reply_parses_as_zero_with_fields() {
+        // Status 0x4A answered `0\t…` on the owner's register.
+        let mut d = b"0\t".to_vec();
+        d.extend_from_slice(&[0x04, 0x80, 0x80, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80]);
+        assert_eq!(parse_error_code(&d), Some(0));
+        // Close fiscal receipt answer: {ErrorCode}<SEP>{SlipNumber}<SEP>.
+        let close = b"0\t000123\t\x04\x80\x80\x80\x80\x86\x9a\x80\x80";
+        assert_eq!(parse_error_code(close), Some(0));
+        assert_eq!(reply_fields(close), vec!["0".to_string(), "000123".to_string()]);
+    }
+
+    #[test]
+    fn no_error_code_in_empty_or_legacy_data() {
+        assert_eq!(parse_error_code(b""), None);
+        assert_eq!(parse_error_code(b"1234,56"), None);
+        assert!(reply_status_bytes(b"0\t").is_empty());
     }
 
     /// Golden test for open_fiscal (TX 450 in the capture):
