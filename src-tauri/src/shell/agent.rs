@@ -21,8 +21,8 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::fiscal::bridge_client::state::now_unix;
-use crate::fiscal::commands::{fiscal_bridge_run, fiscal_bridge_state};
+use crate::fiscal::bridge_client::state::{now_unix, token_hash};
+use crate::fiscal::commands::{fiscal_bridge_run, fiscal_bridge_state, running_token_hash};
 use crate::fiscal::credentials;
 use crate::fiscal::diagnostics::probe::list_ports;
 use crate::fiscal::persist;
@@ -54,6 +54,9 @@ pub struct AgentSummary {
     pub connected: bool,
     pub bridge_id: Option<String>,
     pub last_error: Option<String>,
+    /// The server refused this station's token ("Deconectează" in the
+    /// admin): a new code is needed (step 2 of the guide).
+    pub revoked: bool,
 }
 
 static HEALTH: Mutex<Option<FiscalHealth>> = Mutex::new(None);
@@ -87,21 +90,21 @@ pub fn summary(app: &AppHandle) -> AgentSummary {
         connected: st.connected,
         bridge_id: st.bridge_id,
         last_error: st.last_error,
+        revoked: st.revoked,
     }
 }
 
 /// Starts the Rust WSS agent from saved credentials. Returns true when it
-/// is running afterwards.
+/// is running afterwards. `fiscal_bridge_run` is a no-op when a loop with
+/// the same credentials already runs, and replaces a loop that runs with
+/// other (older) credentials.
 fn start_rust_agent(app: &AppHandle) -> bool {
-    if fiscal_bridge_state().configured {
-        return true;
-    }
     let creds = match persist::db_path(app)
         .ok()
         .and_then(|p| credentials::read(&p).ok().flatten())
     {
         Some(c) => c,
-        None => return false,
+        None => return fiscal_bridge_state().configured,
     };
     let model = creds
         .printer_model
@@ -110,7 +113,7 @@ fn start_rust_agent(app: &AppHandle) -> bool {
         .unwrap_or_else(|| "datecs_dp25".into());
     match fiscal_bridge_run(app.clone(), creds.websocket_url, creds.device_token, model) {
         Ok(()) => {
-            log::info!("agent: Rust fiscal agent started (bridge_id={})", creds.bridge_id);
+            log::info!("agent: Rust fiscal agent running (bridge_id={})", creds.bridge_id);
             true
         }
         Err(e) => {
@@ -122,14 +125,26 @@ fn start_rust_agent(app: &AppHandle) -> bool {
 
 fn supervise_rust_agent(app: &AppHandle) {
     let st = fiscal_bridge_state();
+    let creds = persist::db_path(app)
+        .ok()
+        .and_then(|p| credentials::read(&p).ok().flatten());
+    let Some(creds) = creds else {
+        return; // not enrolled: nothing to run
+    };
+    let saved = token_hash(&creds.device_token);
     if st.configured {
+        // Running — but with the saved credentials? A new enrolment saved
+        // without restarting the loop gets picked up here.
+        if running_token_hash() != Some(saved) {
+            log::info!("agent: saved credentials changed — replacing the running loop");
+            start_rust_agent(app);
+        }
         return;
     }
-    if let Some(err) = st.last_error.as_deref() {
-        if err.contains("re-enroll") {
-            // Token revoked: only a new enrolment from the fiscal window helps.
-            return;
-        }
+    if st.revoked && st.revoked_token_hash == Some(saved) {
+        // This exact token was refused by the server: only a new enrolment
+        // (a new code in step 2) helps. New credentials → start below.
+        return;
     }
     if let (Some(4000), Some(stopped)) = (st.close_code, st.stopped_at) {
         if now_unix().saturating_sub(stopped) < 300 {
@@ -164,11 +179,15 @@ fn check_printer(app: &AppHandle) {
     let provider = runtime_config::effective_provider(&cfg);
     let port = runtime_config::effective_serial_port(&cfg);
     if provider == "simulator" {
+        // Simulator = no register. On the tenant build that is simply "not
+        // configured" (never "online"); dev/demo builds keep the old view.
+        let allowed = runtime_config::simulator_allowed();
         set_health(FiscalHealth {
             monitored: false,
-            provider,
+            provider: if allowed { provider } else { "neconfigurat".into() },
             port,
-            online: Some(true),
+            online: if allowed { Some(true) } else { None },
+            last_error: if allowed { None } else { Some(runtime_config::NOT_CONFIGURED_RO.into()) },
             ..base
         });
         return;

@@ -6,6 +6,7 @@
 // + Tauri commands. WSS / enrollment integration with the backend lands in
 // Sprint 1.b (see fiscal-port-status.md).
 
+pub mod agent_journal;
 pub mod bridge_client;
 pub mod commands;
 pub mod config;

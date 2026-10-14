@@ -186,6 +186,31 @@ pub fn effective_provider(cfg: &RuntimeConfig) -> String {
         .unwrap_or_else(|| "simulator".into())
 }
 
+/// 2026-10-14 („o singură cale”): the simulator answers "printed" without
+/// touching any register. Allowed only in a debug build (dev, `cargo test`)
+/// or a demo build (`POS_BUILD_PROFILE=demo` at compile time) — never in
+/// the tenant installer.
+pub fn simulator_allowed() -> bool {
+    cfg!(debug_assertions) || matches!(option_env!("POS_BUILD_PROFILE"), Some("demo"))
+}
+
+/// Romanian message shown when the station has no real register set up.
+pub const NOT_CONFIGURED_RO: &str =
+    "Casa de marcat nu e configurată pe această stație. Deschide Ctrl+Shift+F → pasul 1, alege casa și portul COM, apoi „Salvează și testează”.";
+
+/// The provider every printing path must use: the configured one, or a
+/// clear error when that would be the simulator (unconfigured station or
+/// leftover "simulator" row) on a build where the simulator is not allowed.
+pub fn usable_provider(cfg: &RuntimeConfig) -> Result<String, FiscalError> {
+    let name = effective_provider(cfg);
+    if name == "simulator" && !simulator_allowed() {
+        return Err(FiscalError::ConfigurationError {
+            detail: NOT_CONFIGURED_RO.into(),
+        });
+    }
+    Ok(name)
+}
+
 pub fn effective_use_rust(cfg: &RuntimeConfig) -> bool {
     cfg.use_rust.or_else(|| env_bool("FISCAL_USE_RUST")).unwrap_or(false)
 }
@@ -288,6 +313,19 @@ mod tests {
     // process env, so toggling FISCAL_* would race other tests in the same
     // binary. The DB-only path below is the one the UI exercises; env
     // fallback is a thin extra branch covered by inspection.
+
+    #[test]
+    fn usable_provider_keeps_a_real_register() {
+        let cfg = RuntimeConfig {
+            provider: Some("datecs_dp25".into()),
+            ..Default::default()
+        };
+        assert_eq!(usable_provider(&cfg).unwrap(), "datecs_dp25");
+        // `cargo test` is a debug build: the simulator is allowed there and
+        // only there (plus demo builds) — see simulator_allowed().
+        assert!(simulator_allowed());
+        assert_eq!(usable_provider(&RuntimeConfig::default()).unwrap(), "simulator");
+    }
 
     #[test]
     fn read_returns_default_when_table_empty() {

@@ -12,6 +12,7 @@
 // are backend-fired diagnostic round-trips, not real fiscal events, and
 // the backend already logs them server-side.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::fiscal::bridge_client::{
@@ -108,7 +109,11 @@ pub fn fiscal_set_runtime_config(
 #[tauri::command]
 pub fn fiscal_test_connection(app: tauri::AppHandle) -> Result<TestResult, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    // 2026-10-14: never "ok" on the simulator / an unconfigured station.
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| {
+        log::warn!("fiscal_test_connection refused: {e}");
+        e.to_string()
+    })?;
     log::info!(
         "fiscal_test_connection: provider={} port={:?} baud={}",
         provider_name,
@@ -134,7 +139,7 @@ pub fn fiscal_test_connection(app: tauri::AppHandle) -> Result<TestResult, Strin
 #[tauri::command]
 pub fn fiscal_get_status(app: tauri::AppHandle) -> Result<FiscalStatus, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| {
         log::error!("fiscal_get_status build failed: {e}");
         e.to_string()
@@ -168,7 +173,7 @@ pub fn fiscal_print_receipt(
     device_id: Option<String>,
 ) -> Result<ReceiptResponse, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     let res = p.print_receipt(request.clone()).map_err(|e| e.to_string())?;
 
@@ -231,7 +236,7 @@ pub fn fiscal_cancel_receipt(
     device_id: Option<String>,
 ) -> Result<ReceiptResponse, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     let res = p.cancel_receipt(request.clone()).map_err(|e| e.to_string())?;
 
@@ -312,7 +317,7 @@ pub fn fiscal_request_z_confirm() -> Result<String, String> {
 #[tauri::command]
 pub fn fiscal_print_x_report(app: tauri::AppHandle) -> Result<ReceiptResponse, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.print_x_report().map_err(|e| e.to_string())
 }
@@ -320,7 +325,7 @@ pub fn fiscal_print_x_report(app: tauri::AppHandle) -> Result<ReceiptResponse, S
 #[tauri::command]
 pub fn fiscal_open_drawer(app: tauri::AppHandle) -> Result<(), String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.open_cash_drawer().map_err(|e| e.to_string())
 }
@@ -328,7 +333,7 @@ pub fn fiscal_open_drawer(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn fiscal_reprint_last(app: tauri::AppHandle) -> Result<ReceiptResponse, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.reprint_last_receipt().map_err(|e| e.to_string())
 }
@@ -340,7 +345,7 @@ pub fn fiscal_print_periodic_memory(
     date_to: String,
 ) -> Result<ReceiptResponse, String> {
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
     p.print_periodic_memory(&date_from, &date_to)
         .map_err(|e| e.to_string())
@@ -371,8 +376,9 @@ pub fn fiscal_print_z_report(
         return Err("Z-report rejected: confirm_token missing, expired, or already used".into());
     }
     let cfg = load_runtime_config(&app);
-    let provider_name = runtime_config::effective_provider(&cfg);
+    let provider_name = runtime_config::usable_provider(&cfg).map_err(|e| e.to_string())?;
     let p = providers::build(&provider_name, &cfg).map_err(|e| e.to_string())?;
+    log::info!("fiscal_print_z_report: provider={provider_name} — closing the fiscal day");
     p.print_z_report(&confirm_token).map_err(|e| e.to_string())
 }
 
@@ -775,6 +781,66 @@ pub fn fiscal_clear_saved_bridge_credentials(
     credentials::clear(&path).map_err(|e| e.to_string())
 }
 
+// 2026-10-14 — the running WSS loop, so new credentials REPLACE it instead
+// of being ignored (the old loop kept the revoked token, failed 3× with 403
+// and the supervisor then refused to restart: agent dead until a restart).
+struct RunningLoop {
+    generation: u64,
+    websocket_url: String,
+    token_hash: u64,
+    stop: tokio::sync::watch::Sender<bool>,
+}
+
+static RUNNING: Mutex<Option<RunningLoop>> = Mutex::new(None);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn is_current_loop(generation: u64) -> bool {
+    GENERATION.load(Ordering::SeqCst) == generation
+}
+
+/// Token fingerprint of the loop currently started (None before any).
+pub fn running_token_hash() -> Option<u64> {
+    RUNNING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|r| r.token_hash)
+}
+
+/// Clears `configured` when the loop thread ends for ANY reason — normal
+/// exit, error, or a panic (before this, a panic left `configured = true`
+/// forever: the supervisor and "Reconectează" never started anything again
+/// and nothing reached the log). A replaced loop leaves the state alone.
+struct LoopGuard {
+    state: SharedState,
+    generation: u64,
+}
+
+impl Drop for LoopGuard {
+    fn drop(&mut self) {
+        let panicking = std::thread::panicking();
+        if panicking {
+            log::error!(
+                "bridge: WSS loop thread panicked (generation {}) — the supervisor will restart it",
+                self.generation
+            );
+        }
+        if !is_current_loop(self.generation) {
+            return;
+        }
+        {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.configured = false;
+            s.connected = false;
+            s.stopped_at = Some(crate::fiscal::bridge_client::state::now_unix());
+            if panicking {
+                s.last_error = Some("agentul fiscal s-a oprit neașteptat (panic) — vezi jurnalul".into());
+            }
+        }
+        self.state.clear_poison();
+    }
+}
+
 #[tauri::command]
 pub fn fiscal_bridge_run(
     app: tauri::AppHandle,
@@ -783,24 +849,48 @@ pub fn fiscal_bridge_run(
     printer_model: String,
 ) -> Result<(), String> {
     let state = shared_state();
-    // Idempotency: if a WSS loop is already configured (or actively
-    // connected), refuse to spawn a second one. Two parallel loops show up
-    // on the backend as `replaced by another bridge` (close 4000) and force
-    // a reconnect storm — exactly the symptom seen during the auto-restart
-    // path running on top of an already-running loop. The auto-restart in
-    // the wizard now becomes a no-op once the loop is up.
-    if let Ok(s) = state.lock() {
-        if s.configured {
+    let th = crate::fiscal::bridge_client::state::token_hash(&device_token);
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let alive = state
+        .lock()
+        .map(|s| s.configured)
+        .unwrap_or_else(|e| e.into_inner().configured);
+    if let Some(r) = running.as_ref() {
+        if alive && r.token_hash == th && r.websocket_url == websocket_url {
+            // Same credentials, loop up: nothing to do (two loops on one
+            // token = "replaced by another bridge" flapping on the server).
             log::info!(
-                "fiscal_bridge_run: already configured (connected={}) — skip spawning a second loop",
-                s.connected
+                "fiscal_bridge_run: loop already running with these credentials (generation {}) — nothing to do",
+                r.generation
             );
             return Ok(());
         }
+        if alive {
+            log::info!(
+                "fiscal_bridge_run: new credentials — stopping loop generation {} and starting a new one",
+                r.generation
+            );
+        }
+        let _ = r.stop.send(true);
     }
-    if let Ok(mut s) = state.lock() {
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    *running = Some(RunningLoop {
+        generation,
+        websocket_url: websocket_url.clone(),
+        token_hash: th,
+        stop: stop_tx,
+    });
+    drop(running);
+    {
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.configured = true;
+        s.connected = false;
         s.stopped_at = None;
+        s.close_code = None;
+        s.last_error = None;
+        s.revoked = false;
+        s.revoked_token_hash = None;
     }
     let db_path = persist::db_path(&app).ok();
     let cfg = WsClientConfig {
@@ -810,33 +900,51 @@ pub fn fiscal_bridge_run(
         db_path,
     };
     let st = state.clone();
+    log::info!("fiscal_bridge_run: starting WSS loop generation {generation}");
     // Spawn a tokio runtime on a dedicated thread so the WSS loop survives
     // outside Tauri's command futures (commands return immediately; the loop
-    // keeps reconnecting until shutdown).
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        rt.block_on(async move {
-            if let Err(e) = run_forever(cfg, st.clone()).await {
-                log::error!("bridge: terminated with error: {e}");
-                if let Ok(mut s) = st.lock() {
-                    s.connected = false;
-                    s.last_error = Some(e.to_string());
+    // keeps reconnecting until shutdown or until new credentials replace it).
+    let spawned = std::thread::Builder::new()
+        .name(format!("pos-fiscal-wss-{generation}"))
+        .spawn(move || {
+            let _guard = LoopGuard {
+                state: st.clone(),
+                generation,
+            };
+            let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("bridge: tokio runtime failed: {e}");
+                    if let Ok(mut s) = st.lock() {
+                        s.last_error = Some(format!("tokio runtime: {e}"));
+                    }
+                    return;
                 }
-            }
-            // Etapa 5 — the loop is gone (replaced by another agent, token
-            // revoked, …). Clear `configured` so the agent supervisor in
-            // `shell::agent` (or the operator) can start it again; before
-            // this, a stopped loop blocked every later `fiscal_bridge_run`.
-            if let Ok(mut s) = st.lock() {
-                s.configured = false;
-                s.connected = false;
-                s.stopped_at = Some(crate::fiscal::bridge_client::state::now_unix());
-            }
+            };
+            let st_loop = st.clone();
+            rt.block_on(async move {
+                if let Err(e) = run_forever(cfg, st_loop.clone(), stop_rx).await {
+                    log::error!("bridge: terminated with error: {e}");
+                    if is_current_loop(generation) {
+                        if let Ok(mut s) = st_loop.lock() {
+                            s.connected = false;
+                            s.last_error = Some(e.to_string());
+                        }
+                    }
+                }
+            });
+            // `_guard` drops here: `configured = false` (if still current)
+            // so the agent supervisor in `shell::agent` can start it again.
         });
-    });
+    if let Err(e) = spawned {
+        log::error!("fiscal_bridge_run: thread spawn failed: {e}");
+        if is_current_loop(generation) {
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.configured = false;
+            s.last_error = Some(format!("thread spawn: {e}"));
+        }
+        return Err(e.to_string());
+    }
     Ok(())
 }
 

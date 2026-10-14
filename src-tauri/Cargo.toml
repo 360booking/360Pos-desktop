@@ -29,7 +29,12 @@ serialport = "4"
 encoding_rs = "0.8"
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+# Both root sets (2026-10-14): tokio-tungstenite 0.21 adds the Windows ROOT
+# store AND the bundled Mozilla roots (webpki-roots) into the same rustls
+# RootCertStore (src/tls.rs, wrap_stream). With native roots only, a till PC
+# whose Windows store lacks ISRG Root X1/X2 could never open the WSS (TLS
+# UnknownIssuer) while reqwest (webpki roots) claimed fine.
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"

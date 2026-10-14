@@ -39,6 +39,39 @@ fn app_data_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Panics go to the app log too (2026-10-14): before, a panic in the fiscal
+/// agent thread left no trace in `360restaurants POS.log`. The default hook
+/// (stderr) still runs after.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        log::error!(
+            "PANIC in thread '{}': {}\n{}",
+            thread.name().unwrap_or("<fără nume>"),
+            info,
+            std::backtrace::Backtrace::force_capture()
+        );
+        previous(info);
+    }));
+}
+
+/// App log (`%LOCALAPPDATA%\com.x360booking.pos\logs`): Info for everything,
+/// Debug for the fiscal agent / printer watchdog and the WSS TLS setup (the
+/// "Added N/M native root certificates" line); 5 MB per file, 5 files kept.
+/// Before: no filter (TRACE from every crate) and the default KeepOne at
+/// 40 KB, which deleted the log at the next start.
+fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_log::Builder::new()
+        .level(log::LevelFilter::Info)
+        .level_for("pos_desktop_lib::fiscal", log::LevelFilter::Debug)
+        .level_for("pos_desktop_lib::shell::agent", log::LevelFilter::Debug)
+        .level_for("tokio_tungstenite", log::LevelFilter::Debug)
+        .max_file_size(5_000_000)
+        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let migrations = vec![
@@ -115,7 +148,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(log_plugin())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -127,6 +160,8 @@ pub fn run() {
         .manage(localdb::LocalDb::new())
         .manage(offline::OfflineStore::new())
         .setup(|app| {
+            install_panic_hook();
+            log::info!("360restaurants POS v{} starting", app.package_info().version);
             let handle = app.handle().clone();
             // Etapa 5 — station config first: it decides what the main
             // window loads and which fiscal agent runs.
@@ -185,6 +220,8 @@ pub fn run() {
             fiscal::commands::fiscal_get_station_pairing,
             fiscal::commands::fiscal_upsert_station_pairing,
             fiscal::commands::fiscal_clear_station_pairing,
+            fiscal::diagnostics::report::fiscal_diagnostics,
+            fiscal::diagnostics::report::fiscal_open_log_dir,
             escpos::escpos_send,
             localdb::db_select,
             localdb::db_execute,
