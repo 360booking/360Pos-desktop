@@ -101,8 +101,8 @@ Exemplu — valorile verificate pe casa noastră (Datecs DP-25X, aprilie 2026):
 O singură dată, ca bonurile din POS-ul web să ajungă la casa asta.
 
 1. Pe telefon sau alt calculator, în adminul 360booking: **Restaurant →
-   Fiscal** → secțiunea **Casa de marcat (bridge)** → **Activează** →
-   **Copiază** codul (valabil 10 minute). Nu descărca nimic de acolo —
+   Fiscal** → secțiunea **Casa de marcat** → **Activează** →
+   **Copiază** codul (valabil 10 minute). Nu trebuie instalat alt program:
    aplicația face legătura singură.
 2. În aplicație lipești codul (Ctrl+V sau **Lipește**) → **Leagă** →
    „Stația e legată ✓ — conectat la server”.
@@ -124,8 +124,8 @@ Jos, închis implicit: toate uneltele tehnice de dinainte, neschimbate —
 formularul complet (provider, port, baud, variantă protocol, operator,
 parolă, adaptor Rust, loguri brute), înrolare cu alt server, test conexiune /
 status, pull config, pairing manual, probe (dialect × baud), raw bytes dump,
-modul agentului (*integrat (Rust)* / *fiscal-bridge separat*). Doar pentru
-tehnician.
+starea agentului fiscal integrat. Doar pentru tehnician. (Programul separat
+fiscal-bridge nu mai există: agentul integrat e singurul.)
 
 ## 5. Test bon + raport X (cu internet)
 

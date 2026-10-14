@@ -1,6 +1,3 @@
-use serde::Serialize;
-use std::path::PathBuf;
-use std::sync::Mutex;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -10,93 +7,6 @@ mod fiscal;
 mod localdb;
 mod offline;
 mod shell;
-
-/// Holds the spawned fiscal-bridge child process so we can stop it on exit.
-/// Wrapped in Mutex<Option> because we may not always have a child (when
-/// the binary is missing or single_instance lock prevents spawn).
-struct BridgeChild(Mutex<Option<std::process::Child>>);
-
-fn locate_bridge_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let resource_dir = app.path().resource_dir().ok()?;
-    let candidates: [PathBuf; 2] = [
-        resource_dir.join("sidecars").join("fiscal-bridge.exe"),
-        resource_dir.join("sidecars").join("fiscal-bridge"),
-    ];
-    candidates.into_iter().find(|p| p.exists())
-}
-
-/// Spawn the bundled fiscal-bridge as a detached child. The bridge has its
-/// own single_instance lock + WS reconnection loop, so we just kick it off
-/// and let it run. stdout/stderr go to the bridge's own log file at
-/// %LocalAppData%\360booking-bridge\bridge.log — keeping POS Desktop's
-/// log focused on UI events.
-pub(crate) fn spawn_fiscal_bridge(app: &tauri::AppHandle) {
-    let bin = match locate_bridge_binary(app) {
-        Some(p) => p,
-        None => {
-            log::info!("fiscal-bridge sidecar not present in resource dir");
-            return;
-        }
-    };
-
-    let mut cmd = std::process::Command::new(&bin);
-    // Hide the console window on Windows so the user doesn't see a flash.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    match cmd.spawn() {
-        Ok(child) => {
-            log::info!(
-                "fiscal-bridge spawned (pid={}) from {}",
-                child.id(),
-                bin.display()
-            );
-            if let Some(state) = app.try_state::<BridgeChild>() {
-                if let Ok(mut guard) = state.0.lock() {
-                    *guard = Some(child);
-                }
-            }
-        }
-        Err(err) => {
-            log::warn!("failed to spawn fiscal-bridge {}: {err}", bin.display());
-        }
-    }
-}
-
-pub(crate) fn stop_fiscal_bridge(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<BridgeChild>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(mut child) = guard.take() {
-                match child.kill() {
-                    Ok(()) => {
-                        let _ = child.wait();
-                        log::info!("fiscal-bridge stopped");
-                    }
-                    Err(err) => log::warn!("failed to stop fiscal-bridge: {err}"),
-                }
-            }
-        }
-    }
-}
-
-/// True while the bundled sidecar child process is alive.
-pub(crate) fn sidecar_running(app: &tauri::AppHandle) -> bool {
-    if let Some(state) = app.try_state::<BridgeChild>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(child) = guard.as_mut() {
-                return matches!(child.try_wait(), Ok(None));
-            }
-        }
-    }
-    false
-}
 
 const MIGRATION_V1_INIT: &str = include_str!("../../src/sql/migrations/0001_init.sql");
 const MIGRATION_V2_EVENTS_ORDER_LINK: &str =
@@ -117,42 +27,6 @@ const MIGRATION_V9_LOCAL_PAYMENT_OUTBOX: &str =
     include_str!("../../src/sql/migrations/0009_local_payment_outbox.sql");
 const MIGRATION_V10_PRODUCT_IMAGE: &str =
     include_str!("../../src/sql/migrations/0010_product_image.sql");
-
-#[derive(Serialize)]
-struct FiscalBridgeStatus {
-    present: bool,
-    path: Option<String>,
-}
-
-/// Reports whether the optional Datecs fiscal-bridge sidecar binary is
-/// installed alongside the app. Sprint 0 only checks presence; actual
-/// fiscalisation lands in Sprint 5.
-#[tauri::command]
-fn fiscal_bridge_status(app: tauri::AppHandle) -> Result<FiscalBridgeStatus, String> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("resource_dir: {e}"))?;
-
-    let candidates: [PathBuf; 2] = [
-        resource_dir.join("sidecars").join("fiscal-bridge.exe"),
-        resource_dir.join("sidecars").join("fiscal-bridge"),
-    ];
-
-    for c in candidates.iter() {
-        if c.exists() {
-            return Ok(FiscalBridgeStatus {
-                present: true,
-                path: Some(c.to_string_lossy().to_string()),
-            });
-        }
-    }
-
-    Ok(FiscalBridgeStatus {
-        present: false,
-        path: None,
-    })
-}
 
 /// Returns the OS-specific application data directory used by the POS
 /// app for config and the SQLite database.
@@ -250,7 +124,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(desktop_plugin::init())
-        .manage(BridgeChild(Mutex::new(None)))
         .manage(localdb::LocalDb::new())
         .manage(offline::OfflineStore::new())
         .setup(|app| {
@@ -274,14 +147,12 @@ pub fn run() {
             }
             shell::start_connectivity_monitor();
             shell::create_main_window(&handle)?;
-            // Fiscal agent: the Rust agent from saved credentials, else the
-            // bundled fiscal-bridge sidecar (its single_instance lock makes
-            // it a no-op next to a service-installed copy). Supervised.
+            // Fiscal agent: the integrated Rust agent, started from the
+            // credentials saved by the enrolment. Supervised.
             shell::agent::start(&handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            fiscal_bridge_status,
             app_data_dir,
             fiscal::commands::fiscal_use_rust_enabled,
             fiscal::commands::fiscal_get_runtime_config,
@@ -335,9 +206,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building 360booking POS")
         .run(|app, event| match event {
-            RunEvent::ExitRequested { .. } => {
-                stop_fiscal_bridge(app);
-            }
             // Only the main window ends the session; closing the fiscal
             // settings window must not kill the fiscal agent.
             RunEvent::WindowEvent {
@@ -345,7 +213,6 @@ pub fn run() {
                 event: WindowEvent::Destroyed,
                 ..
             } if label == shell::MAIN => {
-                stop_fiscal_bridge(app);
                 app.exit(0);
             }
             _ => {}

@@ -12,9 +12,8 @@
  *   - integration tests against a real terminal can be authored on
  *     Windows without touching this file again.
  *
- * BT's ECR Protocol runs over a local TCP/serial channel exposed by
- * the fiscal-bridge sidecar (`fiscal-bridge.exe` on Windows, listening
- * on 127.0.0.1:17891 — see `reference_bt_pos_terminal_integration` in
+ * BT's ECR Protocol runs over a local TCP/serial channel (planned on
+ * 127.0.0.1:17891 — see `reference_bt_pos_terminal_integration` in
  * the project memory). The actual wire protocol is BT-specific and
  * documented in BT's "ECR Protocol Specifications". Sprint 10 task:
  *
@@ -35,7 +34,7 @@ import type {
 } from './types';
 
 export interface BtEcrConfig {
-  /** Where the sidecar exposes the ECR bridge. */
+  /** Local endpoint that exposes the ECR channel. */
   bridgeUrl: string; // e.g. 'http://127.0.0.1:17891'
   /** Terminal serial / merchant id, baked into every charge envelope. */
   terminalId?: string;

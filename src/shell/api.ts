@@ -17,7 +17,8 @@ export interface ShellConfig {
   /** Set by the shell once the kiosk mode was chosen on this station. */
   kioskChosen?: boolean;
   autostart: boolean;
-  fiscalAgent: 'auto' | 'rust' | 'sidecar' | 'off';
+  /** Always 'auto': the integrated fiscal agent is the only one. */
+  fiscalAgent: 'auto';
   offlineDefaultVat: number;
   offlineAllowSimulator: boolean;
 }
@@ -45,14 +46,11 @@ export interface FiscalHealth {
 }
 
 export interface AgentSummary {
-  setting: string;
-  resolved: 'rust' | 'sidecar' | 'off';
   hasSavedCredentials: boolean;
   running: boolean;
   connected: boolean;
   bridgeId: string | null;
   lastError: string | null;
-  sidecarRunning: boolean;
 }
 
 export interface JournalCounts {

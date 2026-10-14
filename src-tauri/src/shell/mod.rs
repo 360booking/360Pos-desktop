@@ -419,9 +419,8 @@ pub async fn shell_set_config(app: AppHandle, config: ShellConfig) -> Result<She
     if !(0.0..=0.3).contains(&next.offline_default_vat) {
         return Err("Cota TVA implicită trebuie să fie între 0 și 0.30 (ex. 0.21).".into());
     }
-    if !matches!(next.fiscal_agent.as_str(), "auto" | "rust" | "sidecar" | "off") {
-        return Err("Agent fiscal necunoscut.".into());
-    }
+    // Only the integrated agent exists; older values are never kept.
+    next.fiscal_agent = config::FISCAL_AGENT_AUTO.into();
     if !matches!(next.mode.as_str(), "web" | "legacy") {
         return Err("Mod necunoscut.".into());
     }
@@ -437,9 +436,6 @@ pub async fn shell_set_config(app: AppHandle, config: ShellConfig) -> Result<She
     }
     if prev.kiosk != next.kiosk {
         let _ = set_kiosk(&app, next.kiosk);
-    }
-    if prev.fiscal_agent != next.fiscal_agent {
-        agent::apply_agent_mode(&app);
     }
     ensure_remote_capability(&app, &next);
     Ok(shell_get_config(app))

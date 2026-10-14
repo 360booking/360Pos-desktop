@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { useDeviceStatus } from '@/store/deviceStatus';
 import { health } from '@/lib/api/client';
-import { fiscalBridgeStatus } from '@/lib/sidecar';
 import { getDb } from '@/lib/db';
 import {
   getFiscal,
@@ -81,20 +80,15 @@ export function useDeviceStatusBootstrap(): void {
     let cancelled = false;
     const tick = async () => {
       try {
-        const [f, p, pr, sb] = await Promise.all([
+        const [f, p, pr] = await Promise.all([
           getFiscal().status(),
           getPayment().status(),
           getPrinter().status(),
-          fiscalBridgeStatus().catch(() => ({ present: false, path: null })),
         ]);
         if (cancelled) return;
         setFiscal(f.ready && f.online && f.paperOk ? 'ok' : 'warn');
         setPayment(p.ready && p.online ? 'ok' : 'warn');
         setPrinter(pr.online && pr.paperOk && pr.coverClosed ? 'ok' : 'warn');
-        if (!sb.present) {
-          // sidecar absent is just info in Sprint 0 (sim mode is fine)
-          logger.debug('sidecar', 'fiscal-bridge sidecar not installed');
-        }
       } catch (err) {
         if (cancelled) return;
         setFiscal('error');

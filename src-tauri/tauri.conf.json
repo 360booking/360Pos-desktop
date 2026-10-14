@@ -26,13 +26,10 @@
       "icons/128x128.png",
       "icons/icon.ico"
     ],
-    "resources": [
-      "sidecars/*"
-    ],
     "publisher": "360booking",
     "category": "Business",
     "shortDescription": "360restaurants POS — Windows",
-    "longDescription": "360restaurants — Windows POS for 360booking restaurants. Offline-first with local SQLite, Datecs fiscal printer support via sidecar, ESC/POS kitchen printers, and card terminal integration.",
+    "longDescription": "360restaurants — Windows POS for 360booking restaurants. Offline-first with local SQLite, integrated Datecs fiscal agent, ESC/POS kitchen printers, and card terminal integration.",
     "windows": {
       "wix": {
         "language": [

@@ -761,7 +761,7 @@ export function FiscalSetupWizard({ onChanged }: { onChanged?: () => void } = {}
       <Step
         n={2}
         title="Conexiune cu backend"
-        subtitle="Cod de înrolare 10 min generat din admin → Restaurant → Fiscal → Casa de marcat (bridge) → Activează."
+        subtitle="Cod de înrolare 10 min generat din admin → Restaurant → Fiscal → Casa de marcat → Activează."
         status={step2Done ? 'done' : claimErr ? 'err' : 'todo'}
         hint={!step1Done ? 'Recomandat: salvează hardware-ul la Pasul 1 mai întâi.' : undefined}
         sectionRef={step2Ref}

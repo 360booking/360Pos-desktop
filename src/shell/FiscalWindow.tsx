@@ -6,7 +6,7 @@
  *                    summary of till + link state always on top, then
  *                    connect the till → link the station → test bill, and
  *                    every technical tool under „Avansat (service)”;
- *   Stația         — tenant address, kiosk, start with Windows, agent.
+ *   Stația         — tenant address, kiosk, start with Windows, offline VAT.
  */
 import { useState } from 'react';
 

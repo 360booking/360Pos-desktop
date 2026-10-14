@@ -1,6 +1,6 @@
 # 360booking POS — Windows Desktop (Sprint 0)
 
-Premium Windows POS for the 360booking restaurant module. Tauri 2 + React 18 + TypeScript + SQLite. Offline-first; reuses the existing `fiscal-bridge` Datecs sidecar; integrates with the FastAPI backend over HTTP/WS.
+Premium Windows POS for the 360booking restaurant module. Tauri 2 + React 18 + TypeScript + SQLite. Offline-first; drives the Datecs fiscal printer through its integrated Rust fiscal agent; integrates with the FastAPI backend over HTTP/WS.
 
 > **Status:** Sprint 0 — scaffold + UI parity skeleton + simulator adapters. No live data yet. Do not deploy.
 
@@ -20,6 +20,13 @@ fiscală) și ca mod „legacy”.
 | Fix „database is locked” (o conexiune, WAL) | `src-tauri/src/localdb.rs`, `src/lib/db.ts` |
 | Partea web (cache note + sincronizare) | repo `frontend`: `src/lib/desktopBridge.ts` |
 
+> **2026-10-14 — fără fiscal-bridge separat.** Programul separat
+> `fiscal-bridge.exe` nu mai e inclus în instalator și nu mai e pornit de
+> aplicație; singurul agent fiscal e cel integrat (Rust), care pornește
+> singur când stația e legată (Ctrl+Shift+F → pasul 2). Setarea veche
+> „Mod agent fiscal” (auto / rust / sidecar / off) a dispărut; orice
+> valoare salvată de o versiune mai veche e citită ca „auto”.
+
 Ghid de instalare și test pentru proprietar: [`docs/INSTALARE-TEST.md`](docs/INSTALARE-TEST.md).
 
 ## Quick start (developer)
@@ -36,7 +43,7 @@ pnpm install            # or: npm install
 pnpm tauri:dev          # opens the Tauri window with HMR
 ```
 
-Web preview without the Tauri shell (no SQLite, no sidecar, useful for UI work):
+Web preview without the Tauri shell (no SQLite, no fiscal agent, useful for UI work):
 
 ```bash
 pnpm dev                # opens http://localhost:1420
@@ -182,7 +189,7 @@ Last verified green: 2026-04-26 (130/130 vitest, tsc clean, vite build OK).
 - Top status bar polls backend health + adapter status.
 - SQLite schema for all sync/transaction tables migrates on first launch.
 - Simulator adapters (fiscal, payment, printer) cycle through success / failure / unknown outcomes.
-- Tauri shell enforces single-instance and exposes `fiscal_bridge_status` + `app_data_dir` commands.
+- Tauri shell enforces single-instance and exposes the `app_data_dir` command.
 
 ## What's stubbed / pending
 

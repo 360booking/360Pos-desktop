@@ -1,6 +1,6 @@
 /**
  * Etapa 5 — station settings form (tenant address, kiosk, start with
- * Windows, fiscal agent, offline VAT). Used by the first-run setup screen
+ * Windows, offline VAT). Used by the first-run setup screen
  * and by the "Stație" tab of the fiscal settings window.
  */
 import { useEffect, useState } from 'react';
@@ -159,19 +159,6 @@ function AdvancedFields({
 }) {
   return (
     <div className="mt-3 grid gap-4 sm:grid-cols-3">
-      <label className="block space-y-1">
-        <span className="text-xs font-semibold text-slate-300">Agent fiscal</span>
-        <select
-          className={input}
-          value={cfg.fiscalAgent}
-          onChange={(e) => set('fiscalAgent', e.target.value as ShellConfig['fiscalAgent'])}
-        >
-          <option value="auto">Automat (recomandat)</option>
-          <option value="rust">Integrat în aplicație</option>
-          <option value="sidecar">fiscal-bridge separat</option>
-          <option value="off">Oprit</option>
-        </select>
-      </label>
       <label className="block space-y-1">
         <span className="text-xs font-semibold text-slate-300">TVA implicit pe bonul offline (%)</span>
         <input className={input} value={vatText} onChange={(e) => setVatText(e.target.value)} inputMode="decimal" />

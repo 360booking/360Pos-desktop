@@ -7,7 +7,7 @@
  *   3. Bon de test — a real 1-leu bill, X report
  *
  * Everything technical (raw fields, protocol variant, pull config, manual
- * pairing, probe sweep, raw bytes, agent mode) lives unchanged in the
+ * pairing, probe sweep, raw bytes, agent state) lives unchanged in the
  * collapsed „Avansat (service)” section at the bottom.
  *
  * No new storage: the guide writes the same fiscal_runtime_config row as the
@@ -384,9 +384,8 @@ export function FiscalGuide() {
       } catch (e) {
         logger.warn('fiscal-guide', 'pullFiscalConfig failed', { err: String(e) });
       }
-      // Apply the agent mode now that credentials exist: stops the old
-      // bundled fiscal-bridge and (re)starts the integrated agent if the
-      // previous loop had ended.
+      // Credentials exist now: (re)start the integrated agent if the
+      // previous loop had ended, and refresh the health shown here.
       await shellApi.fiscalReconnect().then(setHealth).catch(() => {});
       setCreds(await guideApi.savedCredentials().catch(() => null));
       setCode('');
@@ -766,7 +765,7 @@ export function FiscalGuide() {
                     Pe telefon sau pe alt calculator, intră în adminul 360booking: <b className="text-slate-100">Restaurant → Fiscal</b>.
                   </li>
                   <li>
-                    La <b className="text-slate-100">Casa de marcat (bridge)</b> apasă <b className="text-slate-100">Activează</b>, apoi{' '}
+                    La <b className="text-slate-100">Casa de marcat</b> apasă <b className="text-slate-100">Activează</b>, apoi{' '}
                     <b className="text-slate-100">Copiază</b> codul (e valabil 10 minute).
                   </li>
                   <li>Lipește codul aici și apasă „Leagă”.</li>

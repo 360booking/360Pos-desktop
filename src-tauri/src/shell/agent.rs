@@ -5,8 +5,9 @@
 // by the enrolment in the fiscal window, and restarted when its loop ends —
 // except after "token revoked" (needs a new enrolment) and, for 5 minutes,
 // after "replaced by another agent" (so two agents never ping-pong).
-// Stations that were never enrolled keep the bundled fiscal-bridge sidecar
-// (pre-Etapa-5 behaviour) unless the station setting says otherwise.
+// It is the only fiscal agent: the separate fiscal-bridge program is gone.
+// A station that was never enrolled simply runs no agent until the
+// enrolment in the fiscal window (Ctrl+Shift+F) saves credentials.
 //
 // Printer watchdog: while the Rust agent owns the device, a STATUS poll
 // (silent, non-fiscal) runs every 20s (60s after repeated failures). The
@@ -28,13 +29,11 @@ use crate::fiscal::persist;
 use crate::fiscal::providers;
 use crate::fiscal::runtime_config;
 
-use super::config;
-
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FiscalHealth {
-    /// False when the watchdog does not poll (sidecar agent, simulator,
-    /// agent off) — `online` is then meaningless.
+    /// False when the watchdog does not poll (station not enrolled,
+    /// simulator) — `online` is then meaningless.
     pub monitored: bool,
     pub provider: String,
     pub port: Option<String>,
@@ -50,16 +49,11 @@ pub struct FiscalHealth {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSummary {
-    /// Station setting: auto | rust | sidecar | off
-    pub setting: String,
-    /// What actually runs: rust | sidecar | off
-    pub resolved: String,
     pub has_saved_credentials: bool,
     pub running: bool,
     pub connected: bool,
     pub bridge_id: Option<String>,
     pub last_error: Option<String>,
-    pub sidecar_running: bool,
 }
 
 static HEALTH: Mutex<Option<FiscalHealth>> = Mutex::new(None);
@@ -85,33 +79,14 @@ fn has_saved_credentials(app: &AppHandle) -> bool {
         .is_some()
 }
 
-/// rust | sidecar | off
-pub fn resolved_agent(app: &AppHandle) -> &'static str {
-    match config::current().fiscal_agent.as_str() {
-        "rust" => "rust",
-        "sidecar" => "sidecar",
-        "off" => "off",
-        _ => {
-            if has_saved_credentials(app) {
-                "rust"
-            } else {
-                "sidecar"
-            }
-        }
-    }
-}
-
 pub fn summary(app: &AppHandle) -> AgentSummary {
     let st = fiscal_bridge_state();
     AgentSummary {
-        setting: config::current().fiscal_agent,
-        resolved: resolved_agent(app).into(),
         has_saved_credentials: has_saved_credentials(app),
         running: st.configured,
         connected: st.connected,
         bridge_id: st.bridge_id,
         last_error: st.last_error,
-        sidecar_running: crate::sidecar_running(app),
     }
 }
 
@@ -145,35 +120,7 @@ fn start_rust_agent(app: &AppHandle) -> bool {
     }
 }
 
-/// Applies the station setting now (boot, or after it changed).
-pub fn apply_agent_mode(app: &AppHandle) {
-    match resolved_agent(app) {
-        "rust" => {
-            // Never both: the sidecar would claim the same COM port and the
-            // backend would see two agents for one tenant.
-            crate::stop_fiscal_bridge(app);
-            start_rust_agent(app);
-        }
-        "sidecar" => {
-            if fiscal_bridge_state().configured {
-                log::warn!("agent: switch to sidecar requested while the Rust agent runs — takes effect after restart");
-            } else if !crate::sidecar_running(app) {
-                crate::spawn_fiscal_bridge(app);
-            }
-        }
-        _ => {
-            crate::stop_fiscal_bridge(app);
-            if fiscal_bridge_state().configured {
-                log::warn!("agent: 'off' requested while the Rust agent runs — takes effect after restart");
-            }
-        }
-    }
-}
-
 fn supervise_rust_agent(app: &AppHandle) {
-    if resolved_agent(app) != "rust" {
-        return;
-    }
     let st = fiscal_bridge_state();
     if st.configured {
         return;
@@ -201,10 +148,11 @@ fn check_printer(app: &AppHandle) {
         last_check_at: Some(now),
         ..prev.clone()
     };
-    if resolved_agent(app) != "rust" {
+    if !has_saved_credentials(app) {
+        // Not enrolled yet: no agent runs, nothing to watch.
         set_health(FiscalHealth {
             monitored: false,
-            provider: "sidecar/off".into(),
+            provider: "neconfigurat".into(),
             ..base
         });
         return;
@@ -276,9 +224,10 @@ fn check_printer(app: &AppHandle) {
     }
 }
 
-/// Boot: apply the agent setting, then supervise in the background.
+/// Boot: start the agent when the station is enrolled, then supervise in
+/// the background.
 pub fn start(app: &AppHandle) {
-    apply_agent_mode(app);
+    start_rust_agent(app);
     let app = app.clone();
     std::thread::Builder::new()
         .name("pos-fiscal-supervisor".into())
@@ -310,13 +259,12 @@ pub fn shell_fiscal_health(app: AppHandle) -> serde_json::Value {
     })
 }
 
-/// "Reconnect now" button: re-applies the agent setting and polls at once.
+/// "Reconnect now" button: (re)starts the agent and polls at once.
 #[tauri::command]
 pub async fn shell_fiscal_reconnect(app: AppHandle) -> Result<serde_json::Value, String> {
     let a = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        apply_agent_mode(&a);
-        supervise_rust_agent(&a);
+        start_rust_agent(&a);
         check_printer(&a);
     })
     .await

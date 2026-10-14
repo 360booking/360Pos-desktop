@@ -13,6 +13,9 @@ use url::Url;
 
 pub const DEFAULT_POS_PATH: &str = "/admin/restaurant/pos";
 
+/// The only fiscal agent mode left: the integrated (Rust) agent.
+pub const FISCAL_AGENT_AUTO: &str = "auto";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ShellConfig {
@@ -33,10 +36,10 @@ pub struct ShellConfig {
     pub kiosk_chosen: bool,
     /// Start with Windows (HKCU Run key).
     pub autostart: bool,
-    /// "auto" | "rust" | "sidecar" | "off" — which fiscal agent runs.
-    ///   auto    → the Rust agent when this station was enrolled from the
-    ///             fiscal window (saved credentials), else the bundled
-    ///             fiscal-bridge sidecar (pre-Etapa-5 behaviour).
+    /// Always "auto" = the integrated fiscal agent, started when this
+    /// station was enrolled from the fiscal window (saved credentials).
+    /// Kept so older files parse; their "rust" | "sidecar" | "off" values
+    /// are read as "auto" (the separate fiscal-bridge program is gone).
     pub fiscal_agent: String,
     /// VAT used on an offline receipt line when the web POS could not tell
     /// the rate of that product (fraction, 0.21 = 21%).
@@ -56,7 +59,7 @@ impl Default for ShellConfig {
             kiosk: true,
             kiosk_chosen: false,
             autostart: false,
-            fiscal_agent: "auto".into(),
+            fiscal_agent: FISCAL_AGENT_AUTO.into(),
             offline_default_vat: 0.21,
             offline_allow_simulator: false,
         }
@@ -131,6 +134,13 @@ pub fn apply_kiosk_default(mut cfg: ShellConfig) -> ShellConfig {
     cfg
 }
 
+/// Files written before the separate fiscal-bridge was removed may say
+/// "rust" | "sidecar" | "off": all of them now mean the integrated agent.
+pub fn only_integrated_agent(mut cfg: ShellConfig) -> ShellConfig {
+    cfg.fiscal_agent = FISCAL_AGENT_AUTO.into();
+    cfg
+}
+
 static CURRENT: OnceLock<Mutex<ShellConfig>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<ShellConfig> {
@@ -150,7 +160,7 @@ pub fn load(app: &AppHandle) -> ShellConfig {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<ShellConfig>(&s).ok())
         .unwrap_or_default();
-    let cfg = apply_kiosk_default(cfg);
+    let cfg = only_integrated_agent(apply_kiosk_default(cfg));
     if let Ok(mut g) = slot().lock() {
         *g = cfg.clone();
     }
@@ -224,6 +234,15 @@ mod tests {
         assert_eq!(c.mode, "web");
         assert_eq!(c.fiscal_agent, "auto");
         assert!((c.offline_default_vat - 0.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn old_fiscal_agent_values_still_parse() {
+        for v in ["sidecar", "off", "rust", "auto"] {
+            let raw = format!(r#"{{"tenantUrl":"x.360booking.ro","fiscalAgent":"{v}"}}"#);
+            let c: ShellConfig = serde_json::from_str(&raw).unwrap();
+            assert_eq!(only_integrated_agent(c).fiscal_agent, "auto");
+        }
     }
 
     #[test]
