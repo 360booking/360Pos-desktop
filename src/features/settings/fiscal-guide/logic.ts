@@ -631,8 +631,75 @@ export function linkSummary(
 
 // --------------------------------------------- connection to the server
 
-/** Shown in step 2 when the server refused this station's token. */
-export const REVOKED_TEXT = 'Legătura a fost anulată din admin — leagă din nou';
+/** Shown on the „Legare” line when the server refused this app's token. */
+export const REVOKED_TEXT = 'Legătura a fost anulată din admin — leag-o din nou';
+
+// ------------------------------------------------- automatic link (2026-10-14)
+
+/** Where the automatic link starts — shown when the window was opened on
+ *  its own (Ctrl+Shift+F) and the app is not linked. */
+export const LINK_FROM_POS_TEXT = 'Deschide Setări → Casa de marcat din POS';
+
+/** Last automatic link, from `shell_fiscal_link_state` (null = none since
+ *  the app started, i.e. the window was opened on its own). */
+export interface AutoLinkState {
+  state: 'linking' | 'ok' | 'error' | string;
+  at: number;
+  error: string | null;
+  bridgeId: string | null;
+}
+
+export interface LinkLine {
+  text: string;
+  tone: Tone;
+  /** Smaller explanation under the line. */
+  hint: string | null;
+  /** 'retry' = button „Reîncearcă legarea” (redoes the link via the admin
+   *  page); 'none' = nothing to press here. */
+  action: 'retry' | 'none';
+}
+
+/**
+ * The „Legare” line that replaced step 2 („Leagă stația”): the link to the
+ * restaurant is made automatically from Setări → Casa de marcat.
+ */
+export function linkLine(s: {
+  enrolled: boolean;
+  connected: boolean;
+  running: boolean;
+  revoked: boolean;
+  auto: AutoLinkState | null;
+}): LinkLine {
+  if (s.auto?.state === 'linking') {
+    return { text: 'Se leagă automat de restaurant…', tone: 'wait', hint: null, action: 'none' };
+  }
+  if (s.enrolled && !s.revoked) {
+    if (s.connected) return { text: 'Legată de restaurant ✓', tone: 'ok', hint: null, action: 'none' };
+    if (s.running) return { text: 'Legată — se conectează…', tone: 'wait', hint: null, action: 'none' };
+    return {
+      text: 'Legată, dar fără conexiune acum',
+      tone: 'bad',
+      hint: 'Verifică internetul, apoi apasă „Reconectează acum”.',
+      action: 'none',
+    };
+  }
+  const why = s.revoked ? REVOKED_TEXT : 'Nelegată încă';
+  if (s.auto) {
+    // Started from the admin page: the link can be redone from there.
+    return {
+      text: s.auto.state === 'error' && s.auto.error ? s.auto.error : why,
+      tone: 'bad',
+      hint: 'Legătura cu restaurantul se face automat. Apasă „Reîncearcă legarea”.',
+      action: 'retry',
+    };
+  }
+  return {
+    text: why,
+    tone: s.revoked ? 'bad' : 'off',
+    hint: `Legătura cu restaurantul se face automat: ${LINK_FROM_POS_TEXT} → „Configurează casa de marcat”.`,
+    action: 'none',
+  };
+}
 
 /**
  * Why the agent cannot reach the server, in plain Romanian, from the raw
@@ -644,7 +711,7 @@ export function explainConnectionError(raw: unknown): string {
   const t = text.toLowerCase();
   if (!t) return 'motiv necunoscut';
   if (/auth rejected|http 40[13]|\b40[13]\b|re-enroll|revoked|4001|4403/.test(t)) {
-    return 'legătura a fost anulată din admin — leagă stația din nou cu un cod nou (pasul 2)';
+    return 'legătura a fost anulată din admin — leag-o din nou din POS: Setări → Casa de marcat';
   }
   if (/certificate|unknownissuer|unknown issuer|invalid peer|webpki|tls|ssl|handshake/.test(t)) {
     return 'certificatul de securitate al serverului nu e recunoscut pe acest calculator (TLS/certificat). Actualizează aplicația; dacă persistă, verifică antivirusul sau proxy-ul';

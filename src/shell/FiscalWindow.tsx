@@ -1,12 +1,13 @@
 /**
- * Etapa 5 — the separate fiscal settings window (Ctrl+Shift+F from the POS).
+ * Window „Casa de marcat” — opened from the POS (Setări → Casa de marcat →
+ * „Configurează casa de marcat”), or with Ctrl+Shift+F for service.
  *
  * Tabs:
- *   Casa de marcat — the owner's 3-step guide (fiscal-guide/FiscalGuide):
- *                    summary of till + link state always on top, then
- *                    connect the till → link the station → test bill, and
- *                    every technical tool under „Avansat (service)”;
- *   Stația         — tenant address, kiosk, start with Windows, offline VAT.
+ *   Casa de marcat    — the guide (fiscal-guide/FiscalGuide): summary on
+ *                       top, find the register → automatic link line →
+ *                       test bill, every technical tool under „Avansat”;
+ *   Setări aplicație  — restaurant address, kiosk, start with Windows,
+ *                       offline VAT (moved off the first-run screen).
  */
 import { useState } from 'react';
 
@@ -14,7 +15,7 @@ import { FiscalGuide } from '@/features/settings/fiscal-guide/FiscalGuide';
 
 import { StationSettings } from './StationSettings';
 
-type Tab = 'fiscal' | 'station';
+type Tab = 'fiscal' | 'app';
 
 export function FiscalWindow() {
   const [tab, setTab] = useState<Tab>('fiscal');
@@ -30,10 +31,10 @@ export function FiscalWindow() {
     <div className="h-full overflow-auto bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-4xl space-y-4 p-4 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-bold">Casa de marcat și stația</h1>
+          <h1 className="text-xl font-bold">Casa de marcat</h1>
           <div className="flex gap-2">
             {tabBtn('fiscal', 'Casa de marcat')}
-            {tabBtn('station', 'Stația')}
+            {tabBtn('app', 'Setări aplicație')}
           </div>
         </div>
         {tab === 'fiscal' ? <FiscalGuide /> : <StationSettings compact />}

@@ -15,10 +15,11 @@ describe('explainConnectionError', () => {
     expect(t).toMatch(/certificat/);
   });
 
-  it('maps a revoked token to „leagă din nou”', () => {
+  it('maps a revoked token to „leag-o din nou din POS”', () => {
     expect(explainConnectionError('auth rejected HTTP 403')).toMatch(/anulată din admin/);
+    // 2026-10-14: no code to paste any more — the link is redone from the POS.
     expect(explainConnectionError('configuration error: device_token revoked — re-enroll required')).toMatch(
-      /cod nou/,
+      /Setări → Casa de marcat/,
     );
   });
 
@@ -59,6 +60,6 @@ describe('revoked link', () => {
     expect(linkSummary(true, false, true, true)).toEqual({ text: 'anulată din admin', tone: 'bad' });
     // Connected wins (a new enrolment already reconnected).
     expect(linkSummary(true, true, true, true).tone).toBe('ok');
-    expect(REVOKED_TEXT).toBe('Legătura a fost anulată din admin — leagă din nou');
+    expect(REVOKED_TEXT).toBe('Legătura a fost anulată din admin — leag-o din nou');
   });
 });

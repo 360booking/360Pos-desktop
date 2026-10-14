@@ -13,18 +13,26 @@
 // local pages only (capabilities/default.json):
 //     offline_list_orders, offline_close_order, offline_mark_reviewed,
 //     offline_requeue, offline_resolve_unknown
+// the configured tenant origin only (runtime capability, shell/mod.rs):
+//     fiscal_link — automatic link from Setări → Casa de marcat
 //
 // Keep the command list in sync with build.rs.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde_json::{json, Value};
 use tauri::plugin::{Builder, TauriPlugin};
-use tauri::{AppHandle, Wry};
+use tauri::{AppHandle, Webview, Wry};
 
+use crate::fiscal::bridge_client::state::now_unix;
+use crate::fiscal::commands::{fiscal_bridge_claim, fiscal_bridge_run};
+use crate::fiscal::config as fiscal_config;
+use crate::fiscal::credentials;
 use crate::fiscal::persist;
 use crate::fiscal::providers;
 use crate::fiscal::runtime_config;
 use crate::offline::{self, CachePayload, CachedOrder, CloseRequest, JournalEntry, Prepared, SyncResult};
-use crate::shell::{self, agent, config};
+use crate::shell::{self, agent, config, link};
 
 async fn blocking<T: Send + 'static>(
     app: AppHandle,
@@ -178,6 +186,99 @@ async fn toggle_kiosk(app: AppHandle) -> Result<bool, String> {
     shell::toggle_kiosk(&app)
 }
 
+// ---------------------------------------------------------------------------
+// Automatic link (2026-10-14, „casa simplu”) — see shell/link.rs.
+
+static LINKING: AtomicBool = AtomicBool::new(false);
+
+struct LinkingGuard;
+impl Drop for LinkingGuard {
+    fn drop(&mut self) {
+        LINKING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Links this app to the restaurant with a fresh enrolment code obtained by
+/// the admin page (POST /api/fiscal-bridge/enroll). Runs the same functions
+/// as step 2 of the guide: claim → fiscal_bridge_run → protocol config →
+/// reconnect. Accepts only a code (8 letters/digits), never a token, and only
+/// from the main window showing the configured tenant site.
+#[tauri::command]
+async fn fiscal_link(app: AppHandle, webview: Webview<Wry>, code: String) -> Result<Value, String> {
+    let cfg = config::current();
+    let tenant = cfg
+        .tenant_origin()
+        .ok_or_else(|| "Adresa restaurantului nu e setată în aplicație.".to_string())?;
+    let page = webview.url().map_err(|e| e.to_string())?;
+    if webview.label() != shell::MAIN || !link::is_tenant_page(&page, &tenant) {
+        log::warn!(
+            "fiscal_link: refused — caller {} on {} is not the restaurant page {}",
+            webview.label(),
+            page.origin().ascii_serialization(),
+            tenant.as_str()
+        );
+        return Err("Legarea casei de marcat se pornește doar din pagina restaurantului.".into());
+    }
+    let code = link::normalise_enrollment_code(&code)
+        .ok_or_else(|| "Codul de legare nu e valid.".to_string())?;
+    if LINKING.swap(true, Ordering::SeqCst) {
+        return Err("Legarea e deja în curs.".into());
+    }
+    let _guard = LinkingGuard;
+    link::set_state(link::LinkState { state: "linking".into(), at: now_unix(), error: None, bridge_id: None });
+    match run_link(&app, &code).await {
+        Ok(v) => {
+            link::set_state(link::LinkState {
+                state: "ok".into(),
+                at: now_unix(),
+                error: None,
+                bridge_id: v.get("bridgeId").and_then(|b| b.as_str()).map(str::to_string),
+            });
+            Ok(v)
+        }
+        Err(raw) => {
+            log::error!("fiscal_link: failed: {raw}");
+            let text = link::explain_link_error(&raw);
+            link::set_state(link::LinkState { state: "error".into(), at: now_unix(), error: Some(text.clone()), bridge_id: None });
+            Err(text)
+        }
+    }
+}
+
+async fn run_link(app: &AppHandle, code: &str) -> Result<Value, String> {
+    let db = persist::db_path(app).ok();
+    let saved = db.as_ref().and_then(|p| credentials::read(p).ok().flatten());
+    let server = saved
+        .as_ref()
+        .map(|c| c.server_base_url.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| link::DEFAULT_SERVER.to_string());
+    let rc = db
+        .as_ref()
+        .and_then(|p| runtime_config::read(p).ok())
+        .unwrap_or_default();
+    let model = link::printer_model_for_claim(rc.provider.as_deref());
+    log::info!("fiscal_link: claiming on {server} (model {model})");
+    // Same calls as step 2 of the guide (fiscal-guide/FiscalGuide.tsx).
+    let r = fiscal_bridge_claim(app.clone(), server.clone(), code.to_string(), model.clone(), None).await?;
+    fiscal_bridge_run(app.clone(), r.websocket_url.clone(), r.device_token.clone(), model)?;
+    match fiscal_config::pull_config(&server, &r.device_token).await {
+        Ok(pulled) => {
+            fiscal_config::put_in_memory(pulled.clone());
+            if let Err(e) = fiscal_config::write_disk_cache(app, &pulled) {
+                log::warn!("fiscal_link: config cache write failed: {e}");
+            }
+        }
+        Err(e) => log::warn!("fiscal_link: pull config failed: {e}"),
+    }
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || agent::reconnect_now(&a))
+        .await
+        .map_err(|e| format!("task: {e}"))?;
+    log::info!("fiscal_link: linked (bridge_id={} tenant_id={})", r.bridge_id, r.tenant_id);
+    Ok(json!({ "bridgeId": r.bridge_id, "tenantId": r.tenant_id }))
+}
+
 pub fn init() -> TauriPlugin<Wry> {
     Builder::<Wry>::new("desktop")
         .invoke_handler(tauri::generate_handler![
@@ -195,6 +296,7 @@ pub fn init() -> TauriPlugin<Wry> {
             open_fiscal_settings,
             open_pos,
             toggle_kiosk,
+            fiscal_link,
         ])
         .build()
 }

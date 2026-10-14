@@ -1,7 +1,8 @@
 /**
- * Etapa 5 — station settings form (tenant address, kiosk, start with
- * Windows, offline VAT). Used by the first-run setup screen
- * and by the "Stație" tab of the fiscal settings window.
+ * App settings (restaurant address, kiosk, start with Windows, offline VAT)
+ * — the „Setări aplicație” tab of the window „Casa de marcat”. Since
+ * 2026-10-14 the first-run screen asks only for the address (StationSetup);
+ * kiosk and start-with-Windows are set here, same storage as before.
  */
 import { useEffect, useState } from 'react';
 
@@ -93,7 +94,7 @@ export function StationSettings({
           </button>
         </div>
         <span className="text-xs text-slate-400">
-          POS-ul se deschide la {state?.posUrl ?? '…/admin/restaurant/pos'}. Te autentifici o singură dată; sesiunea rămâne salvată pe stație.
+          POS-ul se deschide la {state?.posUrl ?? '…/admin/restaurant/pos'}. Te autentifici o singură dată; sesiunea rămâne salvată pe acest calculator.
         </span>
       </label>
 

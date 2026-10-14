@@ -57,6 +57,10 @@ pub struct AgentSummary {
     /// The server refused this station's token ("Deconectează" in the
     /// admin): a new code is needed (step 2 of the guide).
     pub revoked: bool,
+    /// Restaurant (tenant) this app is linked to, from the saved enrolment.
+    /// The admin page compares it with its own tenant: same → nothing to
+    /// link; another → ask before linking again.
+    pub tenant_id: Option<String>,
 }
 
 static HEALTH: Mutex<Option<FiscalHealth>> = Mutex::new(None);
@@ -84,8 +88,12 @@ fn has_saved_credentials(app: &AppHandle) -> bool {
 
 pub fn summary(app: &AppHandle) -> AgentSummary {
     let st = fiscal_bridge_state();
+    let saved = persist::db_path(app)
+        .ok()
+        .and_then(|p| credentials::read(&p).ok().flatten());
     AgentSummary {
-        has_saved_credentials: has_saved_credentials(app),
+        has_saved_credentials: saved.is_some(),
+        tenant_id: saved.map(|c| c.tenant_id).filter(|t| !t.is_empty()),
         running: st.configured,
         connected: st.connected,
         bridge_id: st.bridge_id,
@@ -278,13 +286,19 @@ pub fn shell_fiscal_health(app: AppHandle) -> serde_json::Value {
     })
 }
 
+/// (Re)starts the agent from the saved credentials and checks the printer
+/// at once — „Reconectează acum”, and the end of an automatic link.
+pub fn reconnect_now(app: &AppHandle) {
+    start_rust_agent(app);
+    check_printer(app);
+}
+
 /// "Reconnect now" button: (re)starts the agent and polls at once.
 #[tauri::command]
 pub async fn shell_fiscal_reconnect(app: AppHandle) -> Result<serde_json::Value, String> {
     let a = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        start_rust_agent(&a);
-        check_printer(&a);
+        reconnect_now(&a);
     })
     .await
     .map_err(|e| e.to_string())?;

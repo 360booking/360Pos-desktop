@@ -4,7 +4,9 @@ fn main() {
     // `desktop:default` set below is what the REMOTE web POS is granted
     // (capabilities/remote-pos.json). The till-only commands
     // (list/close/review/requeue) are granted to local pages only
-    // (capabilities/default.json). Keep in sync with desktop_plugin.rs.
+    // (capabilities/default.json). `fiscal_link` is in NEITHER: it is granted
+    // at runtime to the configured tenant origin only (shell/mod.rs,
+    // ensure_link_capability). Keep in sync with desktop_plugin.rs.
     const DESKTOP_COMMANDS: &[&str] = &[
         "bridge_info",
         "offline_cache_orders",
@@ -20,6 +22,7 @@ fn main() {
         "open_fiscal_settings",
         "open_pos",
         "toggle_kiosk",
+        "fiscal_link",
     ];
     let remote_safe = [
         "allow-bridge-info",

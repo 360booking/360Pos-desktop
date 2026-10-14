@@ -23,7 +23,8 @@ fiscală) și ca mod „legacy”.
 > **2026-10-14 — fără fiscal-bridge separat.** Programul separat
 > `fiscal-bridge.exe` nu mai e inclus în instalator și nu mai e pornit de
 > aplicație; singurul agent fiscal e cel integrat (Rust), care pornește
-> singur când stația e legată (Ctrl+Shift+F → pasul 2). Setarea veche
+> singur când aplicația e legată de restaurant (din POS: Setări → Casa de
+> marcat → Configurează casa de marcat; legarea e automată din 2026-10-14). Setarea veche
 > „Mod agent fiscal” (auto / rust / sidecar / off) a dispărut; orice
 > valoare salvată de o versiune mai veche e citită ca „auto”.
 

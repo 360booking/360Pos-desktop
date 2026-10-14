@@ -1,10 +1,14 @@
 /**
- * Ghidul „Casa de marcat în 3 pași” — what the restaurant owner sees in the
- * fiscal window (Ctrl+Shift+F → Casa de marcat).
+ * Ghidul casei de marcat — what the restaurant owner sees in the window
+ * „Casa de marcat”, opened from the POS: Setări → Casa de marcat →
+ * „Configurează casa de marcat” (or Ctrl+Shift+F, for service).
  *
- *   1. Conectează casa de marcat — model, automatic port search, save + test
- *   2. Leagă stația de restaurant — activation code from the web admin
- *   3. Bon de test — a real 1-leu bill, X report
+ *   1. Găsește casa de marcat — model, automatic port search, save + test
+ *   „Legare” — a status line, no longer a step to do by hand (2026-10-14):
+ *      the admin page links the app to the restaurant automatically
+ *      (fresh code → desktopBridge.fiscal.link). The manual code field
+ *      lives only in „Avansat (service)”.
+ *   3. Bon de test — a real 1-leu bill
  *
  * Everything technical (raw fields, protocol variant, pull config, manual
  * pairing, probe sweep, raw bytes, agent state) lives unchanged in the
@@ -15,21 +19,20 @@
  * the agent auto-start and web POS printing keep working as before.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ClipboardCopy, ClipboardPaste, FolderOpen, Link2, Printer, RefreshCw, Search, ShieldAlert, Usb } from 'lucide-react';
+import { ClipboardCopy, FolderOpen, Link2, Printer, RefreshCw, Search, ShieldAlert, Usb } from 'lucide-react';
 
 import { enableRustFiscalIfAllowed } from '@/adapters';
-import { getCachedFiscalConfig, pullFiscalConfig } from '@/adapters/fiscal/config';
+import { getCachedFiscalConfig } from '@/adapters/fiscal/config';
 import { RustFiscalAdapter } from '@/adapters/fiscal/rust';
 import {
   getFiscalRuntimeConfig,
   setFiscalRuntimeConfig,
   type FiscalRuntimeConfig,
 } from '@/adapters/fiscal/runtime-config';
-import { getConfig } from '@/lib/config';
 import { logger } from '@/lib/logger';
 import { errText, shellApi, type AgentSummary, type FiscalHealth } from '@/shell/api';
 
-import { DEFAULT_SERVER, guideApi, listPorts, type BridgeState, type SavedBridgeCredentials } from './api';
+import { guideApi, listPorts, type BridgeState, type SavedBridgeCredentials } from './api';
 import {
   SUPPORTED_BAUDS,
   TILL_MODELS,
@@ -38,15 +41,14 @@ import {
   completeOnOpen,
   defaultsForModel,
   deriveSteps,
-  explainClaimError,
   explainConnectionError,
   explainFiscalError,
   findModel,
   formFromConfig,
   formProblem,
   isRealProvider,
+  linkLine,
   linkSummary,
-  normaliseEnrollmentCode,
   orderPortsForSearch,
   portLabel,
   printerAnswer,
@@ -54,7 +56,7 @@ import {
   summariseSearch,
   tillSummary,
   vatLabel,
-  REVOKED_TEXT,
+  type AutoLinkState,
   type Explained,
   type GuideForm,
   type LocalCheck,
@@ -99,11 +101,9 @@ function emptyRuntimeConfig(): FiscalRuntimeConfig {
   };
 }
 
-const STEP_TITLES = ['Conectează casa de marcat', 'Leagă stația de restaurant', 'Bon de test'] as const;
+const STEP_TITLES = ['Găsește casa de marcat', 'Legătura cu restaurantul', 'Bon de test'] as const;
 
 export function FiscalGuide() {
-  const deviceId = getConfig().deviceId ?? '';
-
   // ------------------------------------------------------------ loaded state
   const [loaded, setLoaded] = useState(false);
   const [cfg, setCfg] = useState<FiscalRuntimeConfig | null>(null);
@@ -124,11 +124,10 @@ export function FiscalGuide() {
   const [localCheck, setLocalCheck] = useState<LocalCheck | null>(null);
   const [tick, setTick] = useState(0);
 
-  // ------------------------------------------------------------ step 2
-  const [code, setCode] = useState('');
-  const [link, setLink] = useState<Outcome>(IDLE);
-  const [confirmRelink, setConfirmRelink] = useState(false);
-  const codeRef = useRef<HTMLInputElement | null>(null);
+  // ------------------------------------------------------------ „Legare”
+  const [autoLink, setAutoLink] = useState<AutoLinkState | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const lastLinkAt = useRef(0);
 
   // ------------------------------------------------------------ step 3
   const [bill, setBill] = useState<Outcome>(IDLE);
@@ -148,6 +147,20 @@ export function FiscalGuide() {
   const refreshHealth = useCallback(() => {
     shellApi.fiscalHealth().then(setHealth).catch(() => {});
     guideApi.bridgeState().then(setBridge).catch(() => {});
+    shellApi
+      .fiscalLinkState()
+      .then((l) => {
+        setAutoLink(l);
+        // A link that just finished saved new credentials: show them.
+        if (l && l.state === 'ok' && l.at !== lastLinkAt.current) {
+          lastLinkAt.current = l.at;
+          guideApi.savedCredentials().then(setCreds).catch(() => {});
+          getCachedFiscalConfig()
+            .then((c) => setProtocol(c?.protocol ?? null))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const reloadConfig = useCallback(async () => {
@@ -259,12 +272,15 @@ export function FiscalGuide() {
     revoked,
     testDone,
   });
-  const shownStep = openStep ?? (current === 'done' ? null : current);
+  // Step 2 is no longer a card: when only the link is missing, the next
+  // thing to do here is the test bill.
+  const shownStep = openStep ?? (current === 'done' ? null : current === 2 ? (testDone ? null : 3) : current);
   const vat = useMemo(() => vatLabel(cfg?.vat_map_json ?? null, protocol), [cfg?.vat_map_json, protocol]);
   const model = findModel(form.modelId);
   const savedModel = findModel(formFromConfig(cfg).modelId);
   const till = tillSummary(tillConfigured, answer);
   const linkS = linkSummary(enrolled, connected, agentRunning, revoked);
+  const line = linkLine({ enrolled, connected, running: agentRunning, revoked, auto: autoLink });
 
   // ------------------------------------------------------------ step 1 actions
   async function refreshPorts() {
@@ -369,63 +385,18 @@ export function FiscalGuide() {
     refreshHealth();
   }
 
-  // ------------------------------------------------------------ step 2 actions
-  async function pasteCode() {
+  // ------------------------------------------------------------ „Legare” actions
+  /** Redo the automatic link: the POS window opens Setări → Casa de marcat,
+   *  which asks the server for a fresh code (needs the administrator). */
+  async function retryLink() {
+    setRetrying(true);
     try {
-      const t = await navigator.clipboard.readText();
-      if (t) setCode(normaliseEnrollmentCode(t).display);
-    } catch {
-      codeRef.current?.focus();
-    }
-  }
-
-  async function linkStation() {
-    const c = normaliseEnrollmentCode(code);
-    if (!c.valid) {
-      setLink({ state: 'err', e: { title: 'Codul are 8 caractere, de forma ABCD-1234.', checks: ['Copiază-l din nou din admin.'] }, raw: '' });
-      return;
-    }
-    setLink({ state: 'busy' });
-    const server = creds?.server_base_url || DEFAULT_SERVER;
-    const printerModel = cfg?.provider && cfg.provider !== 'simulator' ? cfg.provider : (model?.provider ?? 'datecs_dp25');
-    try {
-      const r = await guideApi.claim(server, c.display, printerModel, deviceId || null);
-      await guideApi.run(r.websocket_url, r.device_token, printerModel);
-      logger.info('fiscal-guide', 'claim + WSS started', { bridge_id: r.bridge_id });
-      try {
-        const pulled = await pullFiscalConfig(server, r.device_token);
-        setProtocol(pulled.protocol ?? null);
-      } catch (e) {
-        logger.warn('fiscal-guide', 'pullFiscalConfig failed', { err: String(e) });
-      }
-      // Credentials exist now: (re)start the integrated agent if the
-      // previous loop had ended, and refresh the health shown here.
-      await shellApi.fiscalReconnect().then(setHealth).catch(() => {});
-      setCreds(await guideApi.savedCredentials().catch(() => null));
-      setCode('');
-      setLink({ state: 'ok', text: 'Stația e legată ✓' });
-      setOpenStep(null);
+      await shellApi.openFiscalLinkPage();
     } catch (err) {
-      setLink({ state: 'err', e: explainClaimError(errText(err)), raw: errText(err) });
-      logger.error('fiscal-guide', 'claim failed', { err: String(err) });
+      logger.warn('fiscal-guide', 'open link page failed', { err: errText(err) });
+    } finally {
+      setTimeout(() => setRetrying(false), 1500);
     }
-    refreshHealth();
-  }
-
-  async function relink() {
-    setConfirmRelink(false);
-    try {
-      await guideApi.clearCredentials();
-      logger.info('fiscal-guide', 'saved credentials cleared — re-enrollment required');
-    } catch (err) {
-      setLink({ state: 'err', e: { title: 'Nu am putut șterge legătura veche.', checks: [] }, raw: errText(err) });
-      return;
-    }
-    setCreds(null);
-    setLink(IDLE);
-    setOpenStep(2);
-    refreshHealth();
-    setTimeout(() => codeRef.current?.focus(), 50);
   }
 
   // ------------------------------------------------------------ step 3 actions
@@ -547,7 +518,7 @@ export function FiscalGuide() {
           </div>
           <div className="flex items-center gap-2 text-sm">
             <Dot tone={linkS.tone} />
-            <span className="text-slate-300">Legătura cu 360booking:</span>
+            <span className="text-slate-300">Legătura cu restaurantul:</span>
             <span className="font-semibold text-slate-100">{linkS.text}</span>
           </div>
           <button className={`${btnGhost} ml-auto`} onClick={() => void reconnect()} disabled={reconnecting}>
@@ -567,8 +538,8 @@ export function FiscalGuide() {
             return (
               <li key={t} className="flex min-w-0 flex-1 items-center gap-2">
                 <button
-                  className={`flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-slate-800 ${active ? 'bg-slate-800' : ''}`}
-                  onClick={() => setOpenStep(n)}
+                  className={`flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-left ${n === 2 ? 'cursor-default' : 'hover:bg-slate-800'} ${active ? 'bg-slate-800' : ''}`}
+                  onClick={() => (n === 2 ? undefined : setOpenStep(n))}
                 >
                   <StepBadge n={n} state={steps[i]} active={active} />
                   <span className={`truncate text-sm ${active ? 'font-semibold text-slate-100' : 'text-slate-400'}`}>{t}</span>
@@ -766,113 +737,30 @@ export function FiscalGuide() {
         </StepCard>
       )}
 
-      {/* ======== step 2 ======== */}
+      {/* ======== „Legare” — automatic, a status line (was step 2) ======== */}
       {loaded && (
-        <StepCard
-          n={2}
-          state={steps[1]}
-          open={shownStep === 2}
-          onOpen={() => setOpenStep(2)}
-          title={STEP_TITLES[1]}
-          summary={
-            revoked
-              ? REVOKED_TEXT
-              : enrolled
-                ? `Stația e legată ✓ — ${connected ? 'conectat la server' : agentRunning ? 'se conectează…' : 'fără conexiune acum'}`
-                : 'O singură dată, cu un cod din adminul 360booking.'
-          }
-        >
-          <div className="space-y-4">
-            <p className="text-sm text-slate-300">
-              Ca bonurile din POS-ul web să ajungă la casa asta, stația trebuie legată o singură dată de contul restaurantului.
-            </p>
-
-            {revoked ? (
-              <ProblemBox
-                e={{
-                  title: REVOKED_TEXT,
-                  checks: [
-                    'Cineva a apăsat „Deconectează” în admin, sau stația a fost legată din nou de altundeva.',
-                    'În admin: Restaurant → Fiscal → Casa de marcat → Activează, apoi Copiază codul.',
-                    'Lipește codul nou mai jos și apasă „Leagă”.',
-                  ],
-                }}
-              />
+        <section className={`rounded-xl border ${line.tone === 'ok' ? 'border-emerald-500/30' : line.tone === 'bad' ? 'border-rose-500/40' : 'border-slate-800'} bg-slate-900/60 p-4`}>
+          <div className="flex flex-wrap items-center gap-3">
+            <StepBadge n={2} state={steps[1]} active={false} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-semibold text-slate-100">Legare:</span>
+                <Dot tone={line.tone} />
+                <span className="text-slate-200">{line.text}</span>
+                {line.tone === 'wait' && autoLink?.state === 'linking' ? <Spinner className="h-3.5 w-3.5" /> : null}
+              </div>
+              {line.hint ? <p className="mt-0.5 text-xs text-slate-400">{line.hint}</p> : null}
+              {creds?.claimed_at && enrolled && !revoked ? (
+                <p className="mt-0.5 text-xs text-slate-500">Legată la {fmtDate(creds.claimed_at)}</p>
+              ) : null}
+            </div>
+            {line.action === 'retry' ? (
+              <button className={btnSecondary} onClick={() => void retryLink()} disabled={retrying}>
+                {retrying ? <Spinner /> : <Link2 className="h-4 w-4" />} Reîncearcă legarea
+              </button>
             ) : null}
-            {enrolled && !confirmRelink && !revoked ? (
-              <div className="space-y-3">
-                <OkBox>
-                  <div className="font-semibold">
-                    Stația e legată ✓ — {connected ? 'conectat la server' : agentRunning ? 'se conectează la server…' : 'fără conexiune acum'}
-                  </div>
-                  {creds?.claimed_at ? <div className="text-xs text-emerald-200/70">Legată la {fmtDate(creds.claimed_at)}</div> : null}
-                  {!connected && !agentRunning ? (
-                    <div className="text-xs text-emerald-200/70">Verifică internetul; apasă „Reconectează acum” sus.</div>
-                  ) : null}
-                </OkBox>
-                <Result o={link} hideOk />
-                <button className={btnGhost} onClick={() => setConfirmRelink(true)}>
-                  <Link2 className="h-4 w-4" /> Leagă din nou
-                </button>
-              </div>
-            ) : enrolled && confirmRelink && !revoked ? (
-              <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-sm text-amber-100">
-                <div className="font-semibold">Legi stația din nou?</div>
-                <p>
-                  Legătura de acum se șterge și ai nevoie de un cod nou din admin. Fă asta doar dacă ai schimbat restaurantul sau
-                  te-a rugat service-ul.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-amber-400" onClick={() => void relink()}>
-                    Da, leagă din nou
-                  </button>
-                  <button className={btnSecondary} onClick={() => setConfirmRelink(false)}>
-                    Renunță
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <>
-                <ol className="ml-5 list-decimal space-y-1 text-sm text-slate-300">
-                  <li>
-                    Pe telefon sau pe alt calculator, intră în adminul 360booking: <b className="text-slate-100">Restaurant → Fiscal</b>.
-                  </li>
-                  <li>
-                    La <b className="text-slate-100">Casa de marcat</b> apasă <b className="text-slate-100">Activează</b>, apoi{' '}
-                    <b className="text-slate-100">Copiază</b> codul (e valabil 10 minute).
-                  </li>
-                  <li>Lipește codul aici și apasă „Leagă”.</li>
-                </ol>
-                <p className="text-xs text-slate-500">Nu descărca nimic de pe pagina din admin — aplicația asta face legătura singură.</p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    ref={codeRef}
-                    className={`${inputCls.replace('w-full ', '')} w-52 font-mono text-lg uppercase tracking-widest`}
-                    placeholder="ABCD-1234"
-                    value={code}
-                    onChange={(e) => setCode(normaliseEnrollmentCode(e.target.value).display)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void linkStation();
-                    }}
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                  <button className={btnSecondary} onClick={() => void pasteCode()}>
-                    <ClipboardPaste className="h-4 w-4" /> Lipește
-                  </button>
-                  <button
-                    className={btnPrimary}
-                    onClick={() => void linkStation()}
-                    disabled={link.state === 'busy' || !normaliseEnrollmentCode(code).valid}
-                  >
-                    {link.state === 'busy' ? <Spinner /> : <Link2 className="h-4 w-4" />} Leagă
-                  </button>
-                </div>
-                <Result o={link} />
-              </>
-            )}
           </div>
-        </StepCard>
+        </section>
       )}
 
       {/* ======== step 3 ======== */}

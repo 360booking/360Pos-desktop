@@ -5,6 +5,11 @@
 // Everything goes through the `desktop` plugin commands, which are the ONLY
 // native commands a remote page may call (see capabilities/remote-pos.json
 // and the runtime capability added for custom tenant domains).
+//
+// `fiscal.link(code)` (2026-10-14): the admin page Setări → Casa de marcat
+// hands a fresh enrolment code to the app. Allowed only on the configured
+// tenant origin (runtime capability + origin check in the command); it
+// accepts a code, never a token.
 (function () {
   'use strict';
   if (window.__POS_DESKTOP_BRIDGE__) return;
@@ -21,8 +26,15 @@
     return t.invoke('plugin:desktop|' + cmd, args || {});
   }
 
+  var fiscal = Object.freeze({
+    /** Opens the window „Casa de marcat” (find the register, test receipt). */
+    open: function () { return call('open_fiscal_settings'); },
+    /** Links the app to the restaurant with a fresh enrolment code. */
+    link: function (code) { return call('fiscal_link', { code: String(code || '') }); },
+  });
+
   var bridge = {
-    version: 1,
+    version: 2,
     kind: 'pos_desktop_tauri',
     info: function () { return call('bridge_info'); },
     cacheOrders: function (payload) { return call('offline_cache_orders', { payload: payload }); },
@@ -33,6 +45,7 @@
     openFiscalSettings: function () { return call('open_fiscal_settings'); },
     openPos: function () { return call('open_pos'); },
     toggleKiosk: function () { return call('toggle_kiosk'); },
+    fiscal: fiscal,
   };
   try {
     Object.defineProperty(window, 'desktopBridge', { value: Object.freeze(bridge), configurable: false });

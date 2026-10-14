@@ -53,6 +53,16 @@ export interface AgentSummary {
   lastError: string | null;
   /** The server refused this station's token ("Deconectează" in the admin). */
   revoked?: boolean;
+  /** Restaurant (tenant) the app is linked to, from the saved enrolment. */
+  tenantId?: string | null;
+}
+
+/** Last automatic link from Setări → Casa de marcat (null: none since start). */
+export interface FiscalLinkState {
+  state: 'linking' | 'ok' | 'error';
+  at: number;
+  error: string | null;
+  bridgeId: string | null;
 }
 
 export interface JournalCounts {
@@ -148,6 +158,10 @@ export const shellApi = {
   quit: () => invoke<void>('shell_quit'),
   fiscalHealth: () => invoke<{ printer: FiscalHealth; agent: AgentSummary }>('shell_fiscal_health'),
   fiscalReconnect: () => invoke<{ printer: FiscalHealth; agent: AgentSummary }>('shell_fiscal_reconnect'),
+  fiscalLinkState: () => invoke<FiscalLinkState | null>('shell_fiscal_link_state'),
+  /** „Reîncearcă legarea”: the POS window opens Setări → Casa de marcat,
+   *  which links the app again with a fresh code. */
+  openFiscalLinkPage: () => invoke<void>('shell_open_fiscal_link_page'),
   printXReport: () =>
     invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>('fiscal_print_x_report'),
   /** Z closes the fiscal day: a single-use token from `requestZConfirm`

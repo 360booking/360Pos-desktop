@@ -37,39 +37,41 @@ se tipărește local, iar plata ajunge pe server când revine internetul.
 
 ## 3. Prima pornire — configurarea stației
 
-1. Apare ecranul **Configurare stație POS**.
-2. La **Adresa restaurantului** scrie adresa din 360booking, de ex.
-   `pizzeria.360booking.ro` (sau domeniul propriu al restaurantului) →
-   **Testează** → trebuie să scrie „… răspunde”.
-3. Bifează după nevoie:
-   - **Mod chioșc** — ecran complet, fără bară de titlu (Ctrl+Shift+K îl
-     pornește/oprește oricând);
-   - **Pornește odată cu Windows**.
-4. **Salvează și deschide POS-ul** → se deschide POS-ul web. Te
-   autentifici o singură dată (cont de ospătar/casier); la repornire
-   rămâi logat.
+1. Apare un singur ecran: **Adresa restaurantului**.
+2. Scrie adresa din 360booking, de ex. `pizzeria.360booking.ro` (sau
+   domeniul propriu al restaurantului) → **Continuă**. Aplicația verifică
+   adresa și deschide POS-ul web. Te autentifici o singură dată; la
+   repornire rămâi logat.
+3. Mod chioșc și pornirea odată cu Windows nu mai apar la prima pornire:
+   sunt în fereastra **Casa de marcat** (Ctrl+Shift+F) → tab **Setări
+   aplicație**. Implicit aplicația pornește pe tot ecranul (F11 comută).
 
 Scurtături în aplicație:
 
 | Tastă | Ce face |
 |---|---|
-| **Ctrl+Shift+F** | fereastra **Casă de marcat și stație** |
+| **Ctrl+Shift+F** | fereastra **Casa de marcat** (pentru service) |
 | **Ctrl+Shift+O** | **Casa offline** |
 | **Ctrl+Shift+K** | mod chioșc pornit/oprit |
 
-## 4. Conectează casa de marcat (ghidul în 3 pași)
+## 4. Conectează casa de marcat
 
-La prima pornire, sub adresa restaurantului apasă **Configurează casa de
-marcat (3 pași)**. Oricând mai târziu: **Ctrl+Shift+F** → tab **Casa de
-marcat**. Sus vezi mereu două lumini:
+Casa de marcat se configurează **doar din aplicație**, dintr-un singur loc:
+în POS, ca administrator, **Setări → Casa de marcat** (pagina
+`/admin/restaurant/fiscal`, secțiunea **Casa de marcat**) → **Configurează
+casa de marcat**. Aplicația se leagă singură de restaurant (fără cod de
+copiat) și se deschide fereastra **Casa de marcat**. Sus vezi mereu două
+lumini:
 
 - **Casa de marcat:** *răspunde* / *nu răspunde* / *neconfigurată*;
-- **Legătura cu 360booking:** *conectată* / *nelegată*.
+- **Legătura cu restaurantul:** *conectată* / *nelegată*.
 
-Dacă stația e deja configurată și legată, ghidul se deschide direct pe
-„Gata! Casa de marcat e pregătită.”
+Dacă totul e deja configurat și legat, fereastra se deschide direct pe
+„Gata! Casa de marcat e pregătită.” Într-un browser obișnuit, pagina din
+admin arată doar starea casei și textul „Casa de marcat se configurează
+doar din aplicația 360restaurants POS pentru Windows”.
 
-### Pasul 1 — Conectează casa de marcat
+### Pasul 1 — Găsește casa de marcat
 
 1. Pornește casa și leag-o cu cablul USB de calculator.
 2. La **Ce casă de marcat ai?** alege **Datecs DP-25X** (sau DP-25 /
@@ -96,18 +98,21 @@ Exemplu — valorile verificate pe casa noastră (Datecs DP-25X, aprilie 2026):
 | Protocol | FP-55 / DP-25 implicit (dialectul DP-25X) |
 | Operator / parolă | 1 / 0001 |
 
-### Pasul 2 — Leagă stația de restaurant
+### Legare (automată)
 
-O singură dată, ca bonurile din POS-ul web să ajungă la casa asta.
+Nu mai e un pas de făcut de mână. Când pornești din **Setări → Casa de
+marcat**, pagina cere serverului un cod nou (unic, valabil 10 minute) și îl
+dă direct aplicației, care se leagă singură. Linia **Legare** din fereastră
+arată *Legată de restaurant ✓*.
 
-1. Pe telefon sau alt calculator, în adminul 360booking: **Restaurant →
-   Fiscal** → secțiunea **Casa de marcat** → **Activează** →
-   **Copiază** codul (valabil 10 minute). Nu trebuie instalat alt program:
-   aplicația face legătura singură.
-2. În aplicație lipești codul (Ctrl+V sau **Lipește**) → **Leagă** →
-   „Stația e legată ✓ — conectat la server”.
-3. După asta agentul pornește singur la fiecare pornire a aplicației. **Leagă
-   din nou** (cu confirmare) e nevoie doar dacă schimbi restaurantul.
+- Dacă aplicația e deja legată de restaurantul tău, nu se mai leagă din nou.
+- Dacă e legată de **alt** restaurant, pagina întreabă înainte.
+- Dacă legarea nu reușește, linia **Legare** arată motivul și butonul
+  **Reîncearcă legarea** (redeschide în POS pagina Setări → Casa de marcat,
+  care reface legarea).
+- Deschisă cu Ctrl+Shift+F fără legare, fereastra spune „Deschide Setări →
+  Casa de marcat din POS”.
+- Codul manual a rămas doar în **Avansat (service)**.
 
 ### Pasul 3 — Bon de test
 
@@ -189,7 +194,7 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
   cu simulatorul* — **doar pe o stație de test**, fiindcă numărul de bon
   simulat ajunge pe server ca bon offline;
 - cota TVA vine de la server pe fiecare produs; dacă lipsește se folosește
-  cota implicită a stației (Ctrl+Shift+F → Stația, implicit 21%)
+  cota implicită a aplicației (Ctrl+Shift+F → Setări aplicație, implicit 21%)
   și e marcată cu * pe ecran.
 
 ## 8. Dacă ceva nu merge
@@ -198,5 +203,5 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
 - Date locale: `%APPDATA%\com.x360booking.pos\` (`pos-offline.db` = jurnalul
   bonurilor offline — **nu-l șterge** cât are rânduri nesincronizate).
 - F12 deschide DevTools (consola) în orice fereastră.
-- Revenire la interfața veche: Ctrl+Shift+F → Stația →
+- Revenire la interfața veche: Ctrl+Shift+F → Setări aplicație →
   Interfață: „POS desktop vechi”.

@@ -11,8 +11,10 @@
 
 pub mod agent;
 pub mod config;
+pub mod link;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -130,8 +132,13 @@ fn open_in_system_browser(url: &str) {
 /// `capabilities/remote-pos.json` covers https://360booking.ro and every
 /// subdomain at build time. A tenant on its own domain gets the same (and
 /// only that) `desktop:default` permission at runtime.
+///
+/// 2026-10-14 („casa simplu”): the configured tenant origin — and only it,
+/// not every *.360booking.ro page — also gets `desktop:allow-fiscal-link`,
+/// the automatic link started from Setări → Casa de marcat.
 fn ensure_remote_capability(app: &AppHandle, cfg: &ShellConfig) {
     let Some(origin) = cfg.tenant_origin() else { return };
+    ensure_link_capability(app, &origin);
     if is_360booking_host(&origin) || REMOTE_CAP_ADDED.load(Ordering::Relaxed) {
         return;
     }
@@ -146,6 +153,30 @@ fn ensure_remote_capability(app: &AppHandle, cfg: &ShellConfig) {
             log::info!("shell: desktop bridge enabled for custom domain {pattern}");
         }
         Err(e) => log::warn!("shell: add_capability for {pattern} failed: {e}"),
+    }
+}
+
+/// Origins that already got the fiscal-link capability (capabilities can't
+/// be removed at runtime; after an address change the old origin is refused
+/// by the origin check in `fiscal_link` itself).
+static LINK_CAPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn ensure_link_capability(app: &AppHandle, origin: &Url) {
+    let pattern = link::capability_pattern(origin);
+    let mut added = LINK_CAPS.lock().unwrap_or_else(|e| e.into_inner());
+    if added.iter().any(|p| p == &pattern) {
+        return;
+    }
+    let cap = CapabilityBuilder::new(format!("remote-fiscal-link-{}", added.len() + 1))
+        .remote(pattern.clone())
+        .window(MAIN)
+        .permission("desktop:allow-fiscal-link");
+    match app.add_capability(cap) {
+        Ok(()) => {
+            log::info!("shell: automatic fiscal link allowed for {pattern} only");
+            added.push(pattern);
+        }
+        Err(e) => log::warn!("shell: add_capability (fiscal link) for {pattern} failed: {e}"),
     }
 }
 
@@ -246,7 +277,7 @@ pub fn open_fiscal_settings(app: &AppHandle) -> Result<(), String> {
     }
     let kiosk = KIOSK.load(Ordering::Relaxed);
     WebviewWindowBuilder::new(app, FISCAL, WebviewUrl::External(local_view(app, Some("fiscal"))))
-        .title("Casă de marcat și stație — setări")
+        .title("Casa de marcat")
         // Fits a 1024x768 / 1366x768 POS screen (taskbar included); the
         // guide scrolls inside the window when it needs more room.
         .inner_size(1000.0, 680.0)
@@ -474,6 +505,28 @@ pub async fn shell_open_offline(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn shell_open_fiscal_settings(app: AppHandle) -> Result<(), String> {
     open_fiscal_settings(&app)
+}
+
+/// Last automatic link (the guide window's „Legare” line). None when the
+/// guide was opened on its own (Ctrl+Shift+F) and nothing was linked since
+/// the app started.
+#[tauri::command]
+pub fn shell_fiscal_link_state() -> Option<link::LinkState> {
+    link::state()
+}
+
+/// „Reîncearcă legarea” in the guide window: the main window opens the admin
+/// page Setări → Casa de marcat, which starts the automatic link by itself
+/// (it needs the administrator's session to get a fresh code).
+#[tauri::command]
+pub async fn shell_open_fiscal_link_page(app: AppHandle) -> Result<(), String> {
+    let cfg = config::current();
+    let tenant = cfg
+        .tenant_origin()
+        .ok_or_else(|| "Adresa restaurantului nu e setată în aplicație.".to_string())?;
+    let url = link::auto_link_url(&tenant).ok_or_else(|| "adresă invalidă".to_string())?;
+    ensure_remote_capability(&app, &cfg);
+    navigate_main(&app, url)
 }
 
 #[tauri::command]
