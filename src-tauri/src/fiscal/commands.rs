@@ -21,7 +21,9 @@ use crate::fiscal::bridge_client::{
 };
 use crate::fiscal::config::{self, FiscalConfig};
 use crate::fiscal::credentials::{self, BridgeCredentials};
-use crate::fiscal::diagnostics::probe::{list_ports, probe_all, ProbeReport};
+use crate::fiscal::diagnostics::probe::{
+    list_ports, list_ports_detailed, probe_all, PortDetail, ProbeReport,
+};
 use crate::fiscal::dto::{
     CancelReceiptRequest, FiscalStatus, ReceiptRequest, ReceiptResponse, TestResult,
 };
@@ -401,13 +403,27 @@ pub fn fiscal_list_payment_attempts(
     persist::list_payment_attempts(&path, &order_local_id).map_err(|e| e.to_string())
 }
 
+/// Etapa 5 (ghid casă de marcat) — async + spawn_blocking: the sweep takes
+/// up to ~20 s per port and, as a plain sync command, ran on the main
+/// thread (window frozen, Windows "Not responding" while "Caută casa
+/// automat" walks the ports). Same body, same result, off the main thread.
 #[tauri::command]
-pub fn fiscal_probe(
+pub async fn fiscal_probe(
     app: tauri::AppHandle,
     port: Option<String>,
     baud: Option<u32>,
 ) -> Result<ProbeReport, String> {
-    let cfg = load_runtime_config(&app);
+    tauri::async_runtime::spawn_blocking(move || fiscal_probe_blocking(&app, port, baud))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fiscal_probe_blocking(
+    app: &tauri::AppHandle,
+    port: Option<String>,
+    baud: Option<u32>,
+) -> Result<ProbeReport, String> {
+    let cfg = load_runtime_config(app);
     let port = port
         .or_else(|| runtime_config::effective_serial_port(&cfg))
         .ok_or_else(|| "Port serial neconfigurat (Settings → Casă de marcat)".to_string())?;
@@ -427,6 +443,13 @@ pub fn fiscal_probe(
 #[tauri::command]
 pub fn fiscal_list_ports() -> Vec<String> {
     list_ports()
+}
+
+/// Same ports as `fiscal_list_ports`, with the USB product / manufacturer
+/// Windows reports (the guide shows "COM4 — <produs>").
+#[tauri::command]
+pub fn fiscal_list_ports_detailed() -> Vec<PortDetail> {
+    list_ports_detailed()
 }
 
 /// Shows the operator + password the Rust side would actually use right now,

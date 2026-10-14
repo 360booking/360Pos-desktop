@@ -57,33 +57,82 @@ Scurtături în aplicație:
 | **Ctrl+Shift+O** | **Casa offline** |
 | **Ctrl+Shift+K** | mod chioșc pornit/oprit |
 
-## 4. Conectează casa de marcat
+## 4. Conectează casa de marcat (ghidul în 3 pași)
 
-1. Leagă casa (DP-25X) prin cablu/USB și porneşte-o. În Windows →
-   Manager dispozitive → Porturi (COM și LPT) vezi portul (ex. `COM3`).
-2. În aplicație: **Ctrl+Shift+F** → tab **Casă de marcat**.
-3. Secțiunea **Configurare hardware**: Provider „Datecs DP-25”, portul
-   COM, baud 115200 sau 9600 (ce a găsit diagnosticul), operator și
-   parolă → **Salvează + Test now** → trebuie `online: true`.
-4. Dacă stația **nu e înrolată** (prima instalare): în adminul web
-   (Restaurant → Casă de marcat) generează un cod de activare, apoi în
-   secțiunea **Bridge backend** lipește codul → **Claim + start WSS**.
-   O singură dată; după aceea agentul pornește singur la fiecare pornire
-   a aplicației.
-5. Sus, în cardul de stare, trebuie să vezi:
-   - **Agent fiscal: integrat (Rust)** — 🟢 *conectat la server*;
-   - **Casa de marcat** — 🟢 *răspunde*, „Ultimul răspuns: acum …”.
+La prima pornire, sub adresa restaurantului apasă **Configurează casa de
+marcat (3 pași)**. Oricând mai târziu: **Ctrl+Shift+F** → tab **Casa de
+marcat**. Sus vezi mereu două lumini:
 
-> Dacă vezi „fiscal-bridge separat”: stația nu are încă înrolare în
-> aplicație și folosește vechiul fiscal-bridge inclus. După pasul 4 trece
-> singură pe agentul integrat (setarea **Avansat → Agent fiscal: Automat**).
+- **Casa de marcat:** *răspunde* / *nu răspunde* / *neconfigurată*;
+- **Legătura cu 360booking:** *conectată* / *nelegată*.
+
+Dacă stația e deja configurată și legată, ghidul se deschide direct pe
+„Gata! Casa de marcat e pregătită.”
+
+### Pasul 1 — Conectează casa de marcat
+
+1. Pornește casa și leag-o cu cablul USB de calculator.
+2. La **Ce casă de marcat ai?** alege **Datecs DP-25X** (sau DP-25 /
+   DP-150X). Restul modelelor sunt gri — nu sunt suportate încă.
+3. Apasă **Caută casa automat**. Aplicația încearcă pe rând porturile COM
+   („Încerc COM4 la 115200…”) și completează singură portul și viteza care
+   au răspuns. Durează câteva secunde pe portul bun și până la ~20 s pe
+   fiecare port greșit.
+   - Dacă nu o găsește: **Aleg eu portul** → alegi portul din listă (cu
+     numele dat de Windows) și viteza.
+4. **Operator** și **Parolă** sunt deja completate cu valorile din fabrică
+   (1 / 0001). Le schimbi doar dacă le-a modificat service-ul casei.
+5. **Salvează și testează** → trebuie să apară **„Casa răspunde ✓”**. Dacă
+   nu, mesajul spune ce să verifici (cablu, curent, port, alt program care
+   folosește portul — ex. DUDE sau vechiul 360booking-bridge —, parolă).
+
+Exemplu — valorile verificate pe casa noastră (Datecs DP-25X, aprilie 2026):
+
+| Câmp | Valoare |
+|---|---|
+| Model | Datecs DP-25X (provider `datecs_dp25`) |
+| Port | `COM4` pe PC-ul de atunci — **depinde de calculator**, îl găsește „Caută casa automat” |
+| Viteză | 115200 |
+| Protocol | FP-55 / DP-25 implicit (dialectul DP-25X) |
+| Operator / parolă | 1 / 0001 |
+
+### Pasul 2 — Leagă stația de restaurant
+
+O singură dată, ca bonurile din POS-ul web să ajungă la casa asta.
+
+1. Pe telefon sau alt calculator, în adminul 360booking: **Restaurant →
+   Fiscal** → secțiunea **Casa de marcat (bridge)** → **Activează** →
+   **Copiază** codul (valabil 10 minute). Nu descărca nimic de acolo —
+   aplicația face legătura singură.
+2. În aplicație lipești codul (Ctrl+V sau **Lipește**) → **Leagă** →
+   „Stația e legată ✓ — conectat la server”.
+3. După asta agentul pornește singur la fiecare pornire a aplicației. **Leagă
+   din nou** (cu confirmare) e nevoie doar dacă schimbi restaurantul.
+
+### Pasul 3 — Bon de test
+
+1. **Tipărește un bon de test de 1 leu** → iese un bon fiscal real de 1 leu,
+   numerar, cota A (procentul apare doar dacă e cunoscut din configurarea
+   restaurantului). Rămâne în raportul zilei — e normal.
+2. **Raport X (nu închide ziua)** → iese raportul X.
+3. Apare **„Gata! Casa de marcat e pregătită.”** și ambele lumini sus sunt
+   verzi.
+
+### Avansat (service)
+
+Jos, închis implicit: toate uneltele tehnice de dinainte, neschimbate —
+formularul complet (provider, port, baud, variantă protocol, operator,
+parolă, adaptor Rust, loguri brute), înrolare cu alt server, test conexiune /
+status, pull config, pairing manual, probe (dialect × baud), raw bytes dump,
+modul agentului (*integrat (Rust)* / *fiscal-bridge separat*). Doar pentru
+tehnician.
 
 ## 5. Test bon + raport X (cu internet)
 
 1. În POS-ul web: deschide o masă, adaugă un produs ieftin (ex. 1 leu),
    **Plătește → Numerar**.
 2. Bonul trebuie să iasă pe casă în câteva secunde.
-3. **Ctrl+Shift+F** → **Raport X (local)** → iese raportul X (nu
+3. **Ctrl+Shift+F** → **Raport X (nu închide ziua)** → iese raportul X (nu
    golește memoria zilei, se poate rula oricând).
 4. Testează și **Raport X** din adminul web (Restaurant → Rapoarte) — trece
    prin server → agent → casă.
@@ -128,7 +177,7 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
 - **Pornire fără internet:** pornește aplicația cu cablul scos — se
   deschide direct Casa offline.
 - **Repornire:** închide și redeschide aplicația — rămâi logat, agentul
-  fiscal se reconectează singur (cardul din Ctrl+Shift+F).
+  fiscal se reconectează singur (luminile de sus din Ctrl+Shift+F).
 
 ## 7. Ce NU face casa offline (deocamdată)
 
@@ -140,7 +189,7 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
   cu simulatorul* — **doar pe o stație de test**, fiindcă numărul de bon
   simulat ajunge pe server ca bon offline;
 - cota TVA vine de la server pe fiecare produs; dacă lipsește se folosește
-  cota implicită a stației (Ctrl+Shift+F → Stație → Avansat, implicit 21%)
+  cota implicită a stației (Ctrl+Shift+F → Stația, implicit 21%)
   și e marcată cu * pe ecran.
 
 ## 8. Dacă ceva nu merge
@@ -149,5 +198,5 @@ produse, **fără reducere/bacșiș**) și lasă POS-ul deschis cel puțin
 - Date locale: `%APPDATA%\com.x360booking.pos\` (`pos-offline.db` = jurnalul
   bonurilor offline — **nu-l șterge** cât are rânduri nesincronizate).
 - F12 deschide DevTools (consola) în orice fereastră.
-- Revenire la interfața veche: Ctrl+Shift+F → Stație → Avansat →
+- Revenire la interfața veche: Ctrl+Shift+F → Stația →
   Interfață: „POS desktop vechi”.

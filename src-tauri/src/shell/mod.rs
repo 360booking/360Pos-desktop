@@ -247,8 +247,11 @@ pub fn open_fiscal_settings(app: &AppHandle) -> Result<(), String> {
     let kiosk = KIOSK.load(Ordering::Relaxed);
     WebviewWindowBuilder::new(app, FISCAL, WebviewUrl::External(local_view(app, Some("fiscal"))))
         .title("Casă de marcat și stație — setări")
-        .inner_size(1100.0, 820.0)
-        .min_inner_size(900.0, 600.0)
+        // Fits a 1024x768 / 1366x768 POS screen (taskbar included); the
+        // guide scrolls inside the window when it needs more room.
+        .inner_size(1000.0, 680.0)
+        .min_inner_size(800.0, 540.0)
+        .center()
         .resizable(true)
         // Over a fullscreen kiosk window it would otherwise open behind it.
         .always_on_top(kiosk)

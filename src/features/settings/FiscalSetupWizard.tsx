@@ -1,5 +1,11 @@
 /**
- * Fiscal setup — single, opinionated 3-step flow on tab "Casa de marcat".
+ * Fiscal setup — the SERVICE form. Since the owner's guide
+ * (fiscal-guide/FiscalGuide.tsx) it lives inside „Avansat (service)” of the
+ * fiscal window (and still as the fiscal tab of the legacy SettingsScreen);
+ * behaviour unchanged, `onChanged` only lets the guide refresh its summary
+ * after a save / enrolment from here.
+ *
+ * Original layout notes:
  *
  *   Pas 1 — Hardware (provider + COM + baud + operator + use_rust)
  *   Pas 2 — Conexiune backend (enrollment code → claim → WSS loop)
@@ -164,7 +170,7 @@ function loggable(c: FiscalRuntimeConfig) {
   };
 }
 
-export function FiscalSetupWizard() {
+export function FiscalSetupWizard({ onChanged }: { onChanged?: () => void } = {}) {
   // ---------------- step 1: hardware ----------------
   const [hw, setHw] = useState<FiscalRuntimeConfig>(emptyHardware());
   const [hwLoaded, setHwLoaded] = useState(false);
@@ -316,6 +322,7 @@ export function FiscalSetupWizard() {
         ...loggable(written),
         rust_adapter_promoted: promoted,
       });
+      onChanged?.();
     } catch (err) {
       setHwSave({ state: 'err', error: String(err) });
       logger.error('fiscal-setup', 'save hardware failed', { err: String(err) });
@@ -331,6 +338,7 @@ export function FiscalSetupWizard() {
       setSavedCreds(null);
       setClaim(null);
       logger.info('fiscal-setup', 'saved credentials cleared — re-enrollment required');
+      onChanged?.();
     } catch (err) {
       setClaimErr(String(err));
     } finally {
@@ -363,6 +371,7 @@ export function FiscalSetupWizard() {
       await refreshPairing();
       await refreshBridgeState();
       logger.info('fiscal-setup', 'claim + WSS started', { bridge_id: r.bridge_id });
+      onChanged?.();
     } catch (e) {
       setClaimErr(String(e));
       logger.error('fiscal-setup', 'claim failed', { err: String(e) });
@@ -524,10 +533,10 @@ export function FiscalSetupWizard() {
     <div className="space-y-6">
       <header>
         <h2 className="text-lg font-semibold text-slate-100 inline-flex items-center gap-2">
-          <Receipt className="h-5 w-5 text-violet-300" /> Casă de marcat — configurare
+          <Receipt className="h-5 w-5 text-violet-300" /> Casă de marcat — formularul de service
         </h2>
         <p className="text-sm text-slate-400 mt-1">
-          Trei pași în ordine: hardware → backend → test. Fiecare pas trebuie verde înainte de următorul.
+          Toate câmpurile, în ordine: hardware → backend → test. Scrie aceleași setări ca ghidul în 3 pași.
         </p>
       </header>
 
@@ -752,7 +761,7 @@ export function FiscalSetupWizard() {
       <Step
         n={2}
         title="Conexiune cu backend"
-        subtitle="Cod de înrolare 10 min generat din admin → Restaurant → Casă de marcat → Activează."
+        subtitle="Cod de înrolare 10 min generat din admin → Restaurant → Fiscal → Casa de marcat (bridge) → Activează."
         status={step2Done ? 'done' : claimErr ? 'err' : 'todo'}
         hint={!step1Done ? 'Recomandat: salvează hardware-ul la Pasul 1 mai întâi.' : undefined}
         sectionRef={step2Ref}
@@ -856,7 +865,7 @@ export function FiscalSetupWizard() {
       <Step
         n={3}
         title="Test conexiune cu casa de marcat"
-        subtitle="Verificare comunicare + status fizic + bon test (1 RON, TVA 19%)."
+        subtitle="Verificare comunicare + status fizic + bon test (1 RON, cota A)."
         status={step3Done ? 'done' : conn.state === 'err' ? 'err' : 'todo'}
         hint={!step1Done ? 'Recomandat: salvează hardware-ul la Pasul 1.' : !step2Done ? 'Pentru fiscalizare reală via WSS: completează Pasul 2.' : undefined}
       >

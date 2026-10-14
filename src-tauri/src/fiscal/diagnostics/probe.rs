@@ -119,3 +119,65 @@ pub fn list_ports() -> Vec<String> {
         .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
         .unwrap_or_default()
 }
+
+/// Etapa 5 (ghid casă de marcat) — the COM ports with what Windows knows
+/// about them, so the guide can show "COM4 — Datecs …" instead of a bare
+/// "COM4". Read-only enumeration, no port is opened.
+#[derive(Debug, Clone, Serialize)]
+pub struct PortDetail {
+    pub name: String,
+    /// usb | bluetooth | pci | unknown
+    pub kind: String,
+    pub product: Option<String>,
+    pub manufacturer: Option<String>,
+    pub vid: Option<u16>,
+    pub pid: Option<u16>,
+}
+
+pub fn list_ports_detailed() -> Vec<PortDetail> {
+    let ports = match serialport::available_ports() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    ports
+        .into_iter()
+        .map(|p| {
+            let name = p.port_name;
+            match p.port_type {
+                serialport::SerialPortType::UsbPort(info) => PortDetail {
+                    name,
+                    kind: "usb".into(),
+                    product: info.product,
+                    manufacturer: info.manufacturer,
+                    vid: Some(info.vid),
+                    pid: Some(info.pid),
+                },
+                serialport::SerialPortType::BluetoothPort => PortDetail {
+                    name,
+                    kind: "bluetooth".into(),
+                    product: None,
+                    manufacturer: None,
+                    vid: None,
+                    pid: None,
+                },
+                serialport::SerialPortType::PciPort => PortDetail {
+                    name,
+                    kind: "pci".into(),
+                    product: None,
+                    manufacturer: None,
+                    vid: None,
+                    pid: None,
+                },
+                #[allow(unreachable_patterns)]
+                _ => PortDetail {
+                    name,
+                    kind: "unknown".into(),
+                    product: None,
+                    manufacturer: None,
+                    vid: None,
+                    pid: None,
+                },
+            }
+        })
+        .collect()
+}
