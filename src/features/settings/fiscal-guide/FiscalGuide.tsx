@@ -897,12 +897,9 @@ export function FiscalGuide() {
               <button className={btnPrimary} onClick={() => void printTestBill()} disabled={bill.state === 'busy' || !tillConfigured}>
                 {bill.state === 'busy' ? <Spinner /> : <Printer className="h-4 w-4" />} Tipărește un bon de test de 1 leu
               </button>
-              <button className={btnSecondary} onClick={() => void printX()} disabled={xrep.state === 'busy' || !tillConfigured}>
-                {xrep.state === 'busy' ? <Spinner /> : null} Raport X (nu închide ziua)
-              </button>
             </div>
+            <p className="text-xs text-slate-400">Raportul X și raportul Z sunt mai jos, la „Rapoarte fiscale”.</p>
             <Result o={bill} />
-            <Result o={xrep} />
           </div>
         </StepCard>
       )}
