@@ -1,7 +1,7 @@
 [package]
 name = "pos-desktop"
 version = "0.1.0"
-description = "360booking POS — Windows desktop app"
+description = "360restaurants POS — Windows desktop app"
 authors = ["360booking"]
 edition = "2021"
 rust-version = "1.77"

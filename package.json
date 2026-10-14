@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.0",
   "private": true,
   "type": "module",
-  "description": "360booking POS — Windows desktop app (Tauri 2 + React)",
+  "description": "360restaurants POS — Windows desktop app (Tauri 2 + React)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

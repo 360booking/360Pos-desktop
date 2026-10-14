@@ -193,7 +193,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // taskbar stays visible). The size below is only the "restore" size, and
     // the minimum fits a 1366×768 screen at 150 % (911×512 logical).
     let mut b = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(url))
-        .title("360booking POS")
+        .title("360restaurants POS")
         .inner_size(1280.0, 720.0)
         .min_inner_size(800.0, 500.0)
         .resizable(true)

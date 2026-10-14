@@ -147,7 +147,7 @@ export function buildTestTicket(paperWidthChars: number): Uint8Array {
     BOLD_OFF,
     NORMAL,
     rule(width),
-    asciiBytes('360booking POS desktop'),
+    asciiBytes('360restaurants POS'),
     lf(),
     asciiBytes(formatTimestamp(new Date())),
     lf(),

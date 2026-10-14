@@ -1,4 +1,4 @@
-# 360booking POS pentru Windows — instalare și test (Etapa 5)
+# 360restaurants POS pentru Windows — instalare și test (Etapa 5)
 
 Aplicația de Windows deschide **POS-ul web** al restaurantului, rulează singură
 **agentul casei de marcat** (modulul Rust testat pe Datecs DP-25X) și are o
@@ -21,7 +21,7 @@ se tipărește local, iar plata ajunge pe server când revine internetul.
    **Run workflow** → ramura `etapa5-pos-web-offline` → **Run workflow**,
    ~10–15 minute).
 4. Jos, la **Artifacts**, descarcă **360booking-pos-windows-tenant** (zip).
-5. Dezarhivează: în `nsis/` e `360booking POS_…_x64-setup.exe`, în `msi/`
+5. Dezarhivează: în `nsis/` e `360restaurants POS_…_x64-setup.exe`, în `msi/`
    e `.msi`. Oricare merge; recomandat `setup.exe`.
 
 > Artefactul se păstrează 14 zile. Build-ul **demo** (`pos-desktop-windows-demo`)
@@ -33,7 +33,7 @@ se tipărește local, iar plata ajunge pe server când revine internetul.
    actualizează peste. Datele locale (înrolarea casei, setările) rămân.
 2. Rulează `setup.exe`. Windows poate afișa „Windows a protejat PC-ul”
    (aplicația nu e semnată încă): **Mai multe informații → Rulează oricum**.
-3. Pornește **360booking POS**.
+3. Pornește **360restaurants POS**.
 
 ## 3. Prima pornire — configurarea stației
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "360booking POS",
+  "productName": "360restaurants POS",
   "version": "0.1.0",
   "identifier": "com.x360booking.pos",
   "build": {
@@ -31,8 +31,8 @@
     ],
     "publisher": "360booking",
     "category": "Business",
-    "shortDescription": "360booking POS — Windows",
-    "longDescription": "Windows POS for 360booking restaurants. Offline-first with local SQLite, Datecs fiscal printer support via sidecar, ESC/POS kitchen printers, and card terminal integration.",
+    "shortDescription": "360restaurants POS — Windows",
+    "longDescription": "360restaurants — Windows POS for 360booking restaurants. Offline-first with local SQLite, Datecs fiscal printer support via sidecar, ESC/POS kitchen printers, and card terminal integration.",
     "windows": {
       "wix": {
         "language": [

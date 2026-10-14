@@ -51,9 +51,9 @@ pnpm tauri:build:demo   # MSI + NSIS, simulator adapters only
 
 Artefacts (after a successful Windows build):
 
-- `src-tauri/target/release/bundle/msi/360booking POS_<version>_x64_en-US.msi`
-- `src-tauri/target/release/bundle/nsis/360booking POS_<version>_x64-setup.exe`
-- Unpacked binary: `src-tauri/target/release/360booking POS.exe`
+- `src-tauri/target/release/bundle/msi/360restaurants POS_<version>_x64_en-US.msi`
+- `src-tauri/target/release/bundle/nsis/360restaurants POS_<version>_x64-setup.exe`
+- Unpacked binary: `src-tauri/target/release/360restaurants POS.exe`
 
 The demo profile is the default — every adapter (`fiscal` / `payment` / `printer`) resolves to the simulator class in `src/adapters/index.ts`, so a demo MSI **cannot** drive a real Datecs printer, BT POS terminal, or ESC/POS kitchen printer even if the COM port is configured. The `tenant` profile (private adapters) is documented in `docs/github-public-release.md` and is only buildable from a private fork.
 
@@ -103,7 +103,7 @@ How to start either:
 
 1. Run the installer (right-click → "Run as administrator" if SmartScreen
    blocks; the binary is unsigned until Sprint 11).
-2. Launch **360booking POS** from the Start Menu.
+2. Launch **360restaurants POS** from the Start Menu.
 3. The first screen is **LoginScreen** — branded, dark theme, with a
    backend status pill. If the pill is red, the machine cannot reach
    `https://360booking.ro` and login will fail. Fix the network first.

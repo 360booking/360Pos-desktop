@@ -13,6 +13,7 @@ import { LoginError, login as loginApi } from '@/lib/api/auth';
 import { getConfig } from '@/lib/config';
 import { logger } from '@/lib/logger';
 import { authDeviceId, useAuthStore } from '@/store/auth';
+import semn360restaurants from '@/assets/semn-360restaurants.png';
 
 const APP_VERSION = '0.1.0';
 
@@ -84,11 +85,15 @@ export function LoginScreen() {
           <aside className="hidden flex-col justify-between rounded-3xl border border-white/10 bg-slate-950/40 p-10 backdrop-blur-md lg:flex">
             <div>
               <div className="flex items-center gap-3 text-violet-300">
-                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 text-2xl font-bold">
-                  POS
-                </div>
+                <img
+                  src={semn360restaurants}
+                  alt=""
+                  width={48}
+                  height={48}
+                  className="h-12 w-12 rounded-2xl bg-white p-1.5"
+                />
                 <div>
-                  <p className="text-lg font-semibold tracking-tight">360booking POS</p>
+                  <p className="text-lg font-semibold tracking-tight">360restaurants POS</p>
                   <p className="text-xs uppercase tracking-[0.18em] text-violet-300/70">desktop</p>
                 </div>
               </div>

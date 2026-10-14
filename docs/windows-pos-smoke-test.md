@@ -182,7 +182,7 @@ Audited 2026-04-26 in `src-tauri/tauri.conf.json` and `src-tauri/capabilities/de
 | Item | State | Notes |
 |---|---|---|
 | `identifier` | ✅ `com.x360booking.pos` | stable, MSI/NSIS will reuse it |
-| `productName` / `version` | ✅ `360booking POS` / `0.1.0` | bump version on every public MSI |
+| `productName` / `version` | ✅ `360restaurants POS` / `0.1.0` | bump version on every public MSI |
 | `bundle.targets` | ✅ `["msi", "nsis"]` | both Win installers; pick one for distribution |
 | `app.security.csp` | ✅ default-src 'self' + connect-src https://* | tight |
 | `capabilities/default.json` | ✅ `core:default`, `log:default`, `shell:allow-open`, `sql:*` for `sqlite:pos-desktop.db` | no serialport / no fiscal-bridge sidecar permissions yet — correct for Sprint 9.5 (no real hardware) |
