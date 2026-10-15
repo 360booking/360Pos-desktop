@@ -12,7 +12,7 @@
 // are backend-fired diagnostic round-trips, not real fiscal events, and
 // the backend already logs them server-side.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::fiscal::bridge_client::{
@@ -22,6 +22,7 @@ use crate::fiscal::bridge_client::{
 };
 use crate::fiscal::config::{self, FiscalConfig};
 use crate::fiscal::credentials::{self, BridgeCredentials};
+use crate::fiscal::diagnostics::detect;
 use crate::fiscal::diagnostics::probe::{
     list_ports, list_ports_detailed, probe_all, PortDetail, ProbeReport,
 };
@@ -458,6 +459,126 @@ pub fn fiscal_list_ports_detailed() -> Vec<PortDetail> {
     list_ports_detailed()
 }
 
+// ---------------------------------------------------------------------------
+// „Caută casa de marcat” (2026-10-15) — see diagnostics/detect.rs.
+
+static DETECT_RUNNING: AtomicBool = AtomicBool::new(false);
+static DETECT_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Event with a `detect::Progress` payload, before every STATUS attempt.
+pub const DETECT_PROGRESS_EVENT: &str = "fiscal-detect-progress";
+
+struct DetectRunning;
+impl Drop for DetectRunning {
+    fn drop(&mut self) {
+        DETECT_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Finds the register: likely ports first (saved, Datecs, USB-serial),
+/// `include_others` = the owner confirmed „Încearcă și celelalte porturi”.
+/// STATUS (0x4A) only, one attempt at a time under the device lock. On
+/// success (and `save` != false) writes port + baud + dialect to the
+/// runtime config.
+#[tauri::command]
+pub async fn fiscal_detect_register(
+    app: tauri::AppHandle,
+    include_others: Option<bool>,
+    save: Option<bool>,
+) -> Result<detect::DetectReport, String> {
+    if DETECT_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("Căutarea casei rulează deja.".into());
+    }
+    DETECT_CANCEL.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _running = DetectRunning;
+        detect_blocking(&app, include_others.unwrap_or(false), save.unwrap_or(true))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// „Oprește căutarea”: the search stops before its next attempt.
+#[tauri::command]
+pub fn fiscal_detect_cancel() {
+    DETECT_CANCEL.store(true, Ordering::SeqCst);
+}
+
+fn detect_blocking(
+    app: &tauri::AppHandle,
+    include_others: bool,
+    save: bool,
+) -> Result<detect::DetectReport, String> {
+    use tauri::Emitter;
+    let cfg = load_runtime_config(app);
+    let saved_port = runtime_config::effective_serial_port(&cfg);
+    // The saved speed goes first only when it was really saved.
+    let preferred_baud = cfg.baud.map(|b| b as u32).filter(|b| *b > 0);
+    let candidates = detect::order_candidates(list_ports_detailed(), saved_port.as_deref());
+    log::info!(
+        "fiscal_detect: {} port(s), include_others={include_others}: {}",
+        candidates.len(),
+        candidates
+            .iter()
+            .map(|c| format!("{}={:?}", c.port.name, c.class))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut prober = detect::SerialProber;
+    let mut report = detect::run_search(
+        &candidates,
+        include_others,
+        preferred_baud,
+        &mut prober,
+        &mut |p| {
+            let _ = app.emit(DETECT_PROGRESS_EVENT, p);
+        },
+        &|| DETECT_CANCEL.load(Ordering::SeqCst),
+    );
+    match report.found.as_ref() {
+        Some(f) => {
+            log::info!(
+                "fiscal_detect: register on {} baud={} dialect={} vid={:?} pid={:?} product={:?} manufacturer={:?}",
+                f.port, f.baud, f.dialect,
+                f.vid.map(|v| format!("{v:04X}")), f.pid.map(|v| format!("{v:04X}")),
+                f.product, f.manufacturer,
+            );
+            if save {
+                let mut next = cfg.clone();
+                next.serial_port = Some(f.port.clone());
+                next.baud = Some(f.baud as i64);
+                next.protocol_variant = Some(f.dialect.clone());
+                let real = matches!(next.provider.as_deref(), Some("datecs_dp25") | Some("datecs_fp"));
+                if !real {
+                    next.provider = Some("datecs_dp25".into());
+                    if next.printer_model.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                        next.printer_model = Some("Datecs DP-25X".into());
+                    }
+                }
+                next.use_rust = Some(true);
+                match persist::db_path(app)
+                    .map_err(|e| e.to_string())
+                    .and_then(|p| runtime_config::write(&p, &next).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => report.saved = true,
+                    Err(e) => {
+                        log::error!("fiscal_detect: saving the found port failed: {e}");
+                        report.save_error = Some(e);
+                    }
+                }
+            }
+        }
+        None => log::info!(
+            "fiscal_detect: no register (tried={} not_tried={} excluded={} cancelled={})",
+            report.tried.len(),
+            report.not_tried.len(),
+            report.excluded.len(),
+            report.cancelled
+        ),
+    }
+    Ok(report)
+}
+
 /// Shows the operator + password the Rust side would actually use right now,
 /// plus the exact bytes it would put on the open_fiscal payload. No serial
 /// I/O — pure read of the runtime config + a build_open_fiscal call. Lets
@@ -534,6 +655,8 @@ pub fn fiscal_raw_debug(app: tauri::AppHandle) -> Result<Vec<RawDebugResult>, St
         let frame_hex = hex_dump(&frame);
         let mut bytes = Vec::<u8>::new();
         let interp;
+        // Same device lock as every provider call (no interleaving).
+        let _device = providers::device_lock();
 
         let opened: Result<Box<dyn SerialPort>, _> = serialport::new(&port_name, baud)
             .data_bits(serialport::DataBits::Eight)

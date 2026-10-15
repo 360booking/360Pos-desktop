@@ -35,6 +35,7 @@ impl FiscalPrinterProvider for SimulatorProvider {
             error_code: None,
             error_message: None,
             raw: Some("SIM_STATUS_OK".into()),
+            codes: Vec::new(),
         })
     }
 

@@ -333,6 +333,215 @@ export function summariseSearch(reports: ProbeReport[], portsSeen: number): Sear
   };
 }
 
+// ------------------------------------- „Caută casa de marcat” (2026-10-15)
+// Rust: fiscal_detect_register (src-tauri/src/fiscal/diagnostics/detect.rs).
+
+export type PortClass = 'saved' | 'datecs' | 'usb_serial' | 'other' | 'excluded';
+export type TryOutcome = 'found' | 'refuses' | 'silent' | 'busy' | 'missing' | 'cancelled';
+
+export interface DetectProgress {
+  port: string;
+  label: string;
+  baud: number;
+  dialect: string;
+  port_index: number;
+  port_total: number;
+}
+
+export interface DetectPortTry {
+  port: string;
+  label: string;
+  class: PortClass;
+  outcome: TryOutcome;
+  attempts: number;
+  detail: string | null;
+}
+
+export interface DetectSkipped {
+  port: string;
+  label: string;
+  class: PortClass;
+  reason: string;
+}
+
+export interface DetectFound {
+  port: string;
+  label: string;
+  baud: number;
+  dialect: string;
+  vid: number | null;
+  pid: number | null;
+  product: string | null;
+  manufacturer: string | null;
+  notice: string | null;
+  reply_hex: string;
+}
+
+export interface DetectReport {
+  ports_seen: number;
+  found: DetectFound | null;
+  saved: boolean;
+  save_error: string | null;
+  tried: DetectPortTry[];
+  not_tried: DetectSkipped[];
+  excluded: DetectSkipped[];
+  cancelled: boolean;
+  included_others: boolean;
+}
+
+export interface DetectSummary extends SearchSummary {
+  /** Offer „Încearcă și celelalte porturi” (ports not probed yet). */
+  askOthers: boolean;
+  /** What the register reports right now (paper…), when found. */
+  notice: string | null;
+}
+
+/** „Încerc COM4 — USB Serial Device la 115200…” */
+export function detectProgressText(p: DetectProgress): { title: string; sub: string } {
+  return {
+    title: `Încerc ${p.label} la ${p.baud}…`,
+    sub: `Portul ${p.port_index} din ${p.port_total} · doar citesc starea casei, nu tipăresc nimic`,
+  };
+}
+
+/** One message for a whole automatic search (Rust detection). */
+export function summariseDetect(r: DetectReport): DetectSummary {
+  const others = r.not_tried.length;
+  const names = r.not_tried.map((p) => p.port).join(', ');
+  const othersText =
+    others === 0
+      ? null
+      : others === 1
+        ? `Portul ${names} nu seamănă cu o casă de marcat și nu l-am încercat.`
+        : `Porturile ${names} nu seamănă cu o casă de marcat și nu le-am încercat.`;
+  if (r.found) {
+    const f = r.found;
+    if (!r.saved && r.save_error) {
+      return {
+        ok: false,
+        title: `Am găsit casa pe ${f.port} (viteza ${f.baud}), dar nu am putut salva setările.`,
+        checks: ['Închide fereastra și încearcă din nou.'],
+        askOthers: false,
+        notice: f.notice,
+      };
+    }
+    return {
+      ok: true,
+      title: `Am găsit casa pe ${f.label} (viteza ${f.baud})${r.saved ? ' și am salvat setările' : ''}.`,
+      checks: [],
+      askOthers: false,
+      notice: f.notice,
+    };
+  }
+  if (r.cancelled) {
+    return { ok: false, title: 'Căutarea a fost oprită.', checks: [], askOthers: false, notice: null };
+  }
+  if (r.ports_seen === 0) {
+    return {
+      ok: false,
+      title: 'Nu văd niciun port COM pe calculatorul ăsta.',
+      checks: [
+        'Cablul USB al casei e băgat în calculator și casa e pornită?',
+        'E instalat driverul Datecs (vine pe CD sau de pe site-ul Datecs)?',
+        'Încearcă alt port USB, apoi caută din nou.',
+      ],
+      askOthers: false,
+      notice: null,
+    };
+  }
+  const refuses = r.tried.find((t) => t.outcome === 'refuses');
+  if (refuses) {
+    return {
+      ok: false,
+      title: `Pe ${refuses.port} e ceva care răspunde, dar refuză comenzile.`,
+      checks: [
+        'Uită-te pe ecranul casei: dacă e un bon rămas deschis, închide-l sau anulează-l din meniul casei.',
+        'Oprește casa, așteaptă 10 secunde și pornește-o din nou.',
+        'Dacă problema rămâne, sună service-ul casei.',
+      ],
+      askOthers: others > 0,
+      notice: null,
+    };
+  }
+  const busy = r.tried.find((t) => t.outcome === 'busy');
+  if (busy) {
+    return {
+      ok: false,
+      title: `Portul ${busy.port} e folosit de alt program.`,
+      checks: [
+        'Închide programele care vorbesc cu casa (DUDE, vechiul „360booking-bridge”, alt program de facturare).',
+        'Apoi caută din nou.',
+      ],
+      askOthers: others > 0,
+      notice: null,
+    };
+  }
+  if (r.tried.length === 0 && others > 0) {
+    return {
+      ok: false,
+      title: 'Niciun port nu seamănă cu o casă de marcat.',
+      checks: [
+        othersText!,
+        'Dacă știi că acolo e casa (de ex. legată cu cablu serial, nu USB), apasă „Încearcă și celelalte porturi”. Nu încerc niciodată porturile Bluetooth sau terminalele de card.',
+      ],
+      askOthers: true,
+      notice: null,
+    };
+  }
+  const checks = [
+    'Casa e pornită și arată ecranul de vânzare (nu un meniu)?',
+    'Cablul e bine prins la ambele capete?',
+    'Încearcă alt port USB, apoi caută din nou.',
+  ];
+  if (othersText) checks.push(othersText, 'Dacă acolo e casa, apasă „Încearcă și celelalte porturi”.');
+  return { ok: false, title: 'Casa nu a răspuns pe niciun port.', checks, askOthers: others > 0, notice: null };
+}
+
+// --------------------------------------------- starea casei (2026-10-15)
+
+/** fiscal::health::RegisterStatus — what the watchdog decoded. */
+export interface RegisterStatus {
+  state: 'ok' | 'warning' | 'blocked' | 'no_answer';
+  connected: boolean;
+  paperOut: boolean;
+  paperNearEnd: boolean;
+  coverOpen: boolean;
+  fiscalMemoryNearFull: boolean;
+  fiscalMemoryError: boolean;
+  zReportRequired: boolean;
+  printerError: boolean;
+  receiptOpen: boolean;
+  message: string | null;
+  codes: string[];
+  checkedAt: number;
+}
+
+export interface Chip {
+  text: string;
+  tone: Tone;
+}
+
+/** Short labels for the summary bar, most urgent first; empty when all is
+ *  well or nothing is known. */
+export function registerChips(r: RegisterStatus | null | undefined): Chip[] {
+  if (!r) return [];
+  if (r.state === 'no_answer') {
+    const out: Chip[] = [{ text: 'nu răspunde', tone: 'bad' }];
+    if (r.zReportRequired) out.push({ text: 'raport Z necesar', tone: 'bad' });
+    return out;
+  }
+  const out: Chip[] = [];
+  if (r.paperOut) out.push({ text: 'fără hârtie', tone: 'bad' });
+  if (r.coverOpen) out.push({ text: 'capac deschis', tone: 'bad' });
+  if (r.zReportRequired) out.push({ text: 'raport Z necesar', tone: 'bad' });
+  if (r.printerError) out.push({ text: 'eroare imprimantă', tone: 'bad' });
+  if (r.fiscalMemoryError) out.push({ text: 'memorie fiscală: service', tone: 'bad' });
+  if (r.paperNearEnd) out.push({ text: 'hârtie pe terminate', tone: 'wait' });
+  if (r.fiscalMemoryNearFull) out.push({ text: 'memorie fiscală aproape plină', tone: 'wait' });
+  if (r.receiptOpen) out.push({ text: 'bon rămas deschis', tone: 'wait' });
+  return out;
+}
+
 // ----------------------------------------------------------- error texts
 
 export interface Explained {

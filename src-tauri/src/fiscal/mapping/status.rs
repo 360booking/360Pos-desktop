@@ -43,6 +43,7 @@ pub fn decode_minimal(status: &[u8; 6]) -> FiscalStatus {
         error_code: full.error_code,
         error_message: full.error_message,
         raw: full.raw,
+        codes: full.flags.iter().map(|f| f.code.to_string()).collect(),
     }
 }
 
@@ -279,6 +280,7 @@ pub fn decode_x_minimal(status: &[u8]) -> FiscalStatus {
         error_code: full.error_code,
         error_message: full.error_message,
         raw: full.raw,
+        codes: full.flags.iter().map(|f| f.code.to_string()).collect(),
     }
 }
 

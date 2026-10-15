@@ -108,6 +108,10 @@ pub struct FiscalStatus {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub raw: Option<String>,
+    /// Every decoded status flag (`X_PAPER_OUT`, `X_COVER_OPEN`, …; see
+    /// mapping/status.rs), warnings and info included — `error_code` only
+    /// carries the most important one. Empty when nothing is set.
+    pub codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

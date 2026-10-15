@@ -4,7 +4,10 @@
 //   client → server : {"type":"hello", ...}
 //   server → client : {"type":"welcome", "bridge_id":"..."}
 //   server → client : {"type":"config",  "protocol": {...}}     # cmd_codes etc.
-//   client → server : {"type":"heartbeat"}                      # every 15s
+//   client → server : {"type":"heartbeat", "printer": {...}|null} # every 15s
+//                     (`printer` = fiscal::health::RegisterStatus, added
+//                     2026-10-15; the server ignores fields it does not
+//                     know, so older servers are unaffected)
 //   server → client : {"type":"heartbeat_ack"}
 //   server → client : {"type":"job", "job_id":"...", "kind":"print_receipt", "payload": {...}}
 //   client → server : {"type":"job_result", "job_id":"...", "success":bool, "data":{...}, "error":null}
@@ -58,8 +61,16 @@ impl WsClientConfig {
     }
 }
 
+/// The heartbeat, with the last register status (null = not monitored).
+fn heartbeat_message() -> Value {
+    json!({
+        "type": "heartbeat",
+        "printer": crate::fiscal::health::heartbeat_payload(),
+    })
+}
+
 /// What this agent can do beyond the base protocol (sent in `hello`).
-pub const CAPABILITIES: &[&str] = &["dedupe_mutation_id"];
+pub const CAPABILITIES: &[&str] = &["dedupe_mutation_id", "printer_status"];
 
 pub async fn run_forever(
     cfg: WsClientConfig,
@@ -185,7 +196,7 @@ async fn run_once(cfg: &WsClientConfig, state: &SharedState) -> Result<(), WsExi
     loop {
         tokio::select! {
             _ = hb_rx.recv() => {
-                if write.send(Message::Text(json!({"type":"heartbeat"}).to_string())).await.is_err() {
+                if write.send(Message::Text(heartbeat_message().to_string())).await.is_err() {
                     break;
                 }
             }
@@ -561,5 +572,13 @@ mod dedupe_tests {
     #[test]
     fn capabilities_announce_dedupe() {
         assert!(CAPABILITIES.contains(&"dedupe_mutation_id"));
+        assert!(CAPABILITIES.contains(&"printer_status"));
+    }
+
+    #[test]
+    fn heartbeat_carries_printer_field() {
+        let hb = heartbeat_message();
+        assert_eq!(hb["type"], "heartbeat");
+        assert!(hb.as_object().unwrap().contains_key("printer"));
     }
 }

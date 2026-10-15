@@ -10,6 +10,15 @@
 // hands a fresh enrolment code to the app. Allowed only on the configured
 // tenant origin (runtime capability + origin check in the command); it
 // accepts a code, never a token.
+//
+// Starea casei (2026-10-15): `fiscal.status()` resolves to the register
+// status the app's watchdog keeps (silent STATUS every 40–60 s, only when
+// the register is idle) — `{ state, connected, paperOut, paperNearEnd,
+// coverOpen, fiscalMemoryNearFull, fiscalMemoryError, zReportRequired,
+// printerError, receiptOpen, message, codes, checkedAt }`, or null when no
+// register is monitored. Every change is also dispatched on `window` as
+// the CustomEvent 'desktop:fiscal-status' (detail = the same object or
+// null). Read-only: it never talks to the register itself.
 (function () {
   'use strict';
   if (window.__POS_DESKTOP_BRIDGE__) return;
@@ -31,10 +40,16 @@
     open: function () { return call('open_fiscal_settings'); },
     /** Links the app to the restaurant with a fresh enrolment code. */
     link: function (code) { return call('fiscal_link', { code: String(code || '') }); },
+    /** Register status from the app's watchdog (null = not monitored). */
+    status: function () {
+      return call('bridge_info').then(function (i) {
+        return (i && i.fiscal && i.fiscal.monitored && i.fiscal.register) || null;
+      });
+    },
   });
 
   var bridge = {
-    version: 2,
+    version: 3,
     kind: 'pos_desktop_tauri',
     info: function () { return call('bridge_info'); },
     cacheOrders: function (payload) { return call('offline_cache_orders', { payload: payload }); },
@@ -51,6 +66,24 @@
     Object.defineProperty(window, 'desktopBridge', { value: Object.freeze(bridge), configurable: false });
   } catch (e) {
     window.desktopBridge = bridge;
+  }
+
+  // 'desktop:fiscal-status' — fired when the register status changes
+  // (polled with bridge_info every 5 s while the page is visible).
+  var lastStatusKey = undefined;
+  function statusKey(r) {
+    if (!r) return 'null';
+    return [r.state, r.connected, r.paperOut, r.paperNearEnd, r.coverOpen, r.fiscalMemoryNearFull,
+      r.fiscalMemoryError, r.zReportRequired, r.printerError, r.receiptOpen, r.message].join('|');
+  }
+  function publishStatus(info) {
+    var r = (info && info.fiscal && info.fiscal.monitored && info.fiscal.register) || null;
+    var key = statusKey(r);
+    if (key === lastStatusKey) return;
+    lastStatusKey = key;
+    try {
+      window.dispatchEvent(new CustomEvent('desktop:fiscal-status', { detail: r }));
+    } catch (e) { /* very old engine */ }
   }
 
   // Only the remote web POS needs the overlay; the local pages have their
@@ -80,7 +113,16 @@
     run().catch(function (e) { console.warn('[desktop]', e); });
   }, true);
 
-  if (!isRemote) return;
+  if (!isRemote) {
+    // Local pages: the event only.
+    var localTick = function () {
+      if (document.visibilityState === 'hidden') return;
+      bridge.info().then(publishStatus).catch(function () {});
+    };
+    setInterval(localTick, 5000);
+    setTimeout(localTick, 500);
+    return;
+  }
 
   // ---------------------------------------------------------------------
   // Status pill: offline → button to the offline till; un-synced or
@@ -115,10 +157,20 @@
     return true;
   }
 
+  function shortReason(r) {
+    if (r.paperOut) return 'Casa nu are hârtie';
+    if (r.coverOpen) return 'Capacul casei e deschis';
+    if (r.zReportRequired) return 'Casa cere raportul Z';
+    if (r.printerError) return 'Casa are o eroare de imprimantă';
+    if (r.fiscalMemoryError) return 'Memoria fiscală a casei are o problemă';
+    return 'Casa de marcat nu poate tipări';
+  }
+
   function render(info) {
     if (!ensureHost()) return;
     var j = (info && info.journal) || {};
-    var html = '', cls = 'p hide';
+    var reg = (info && info.fiscal && info.fiscal.monitored && info.fiscal.register) || null;
+    var html = '', cls = 'p hide', blockedText = null;
     if (info && info.online === false) {
       offlineTicks += 1;
     } else {
@@ -137,17 +189,28 @@
     } else if (info && info.fiscal && info.fiscal.monitored && info.fiscal.online === false) {
       cls = 'p warn';
       html = '<span>Casa de marcat nu răspunde</span><button data-a="fiscal">Setări</button>';
+    } else if (reg && reg.state === 'blocked') {
+      // Paper out, cover open, Z necesar… — receipts cannot print.
+      cls = 'p warn';
+      html = '<span></span><button data-a="fiscal">Setări</button>';
+      blockedText = shortReason(reg);
     }
-    if (html !== lastHtml) {
+    var key = html + (blockedText || '');
+    if (key !== lastHtml) {
       pill.innerHTML = html;
-      lastHtml = html;
+      // Text set as text (never as HTML).
+      if (blockedText) pill.firstChild.textContent = blockedText;
+      lastHtml = key;
     }
     pill.className = cls;
   }
 
   function tick() {
     if (document.visibilityState === 'hidden') return;
-    bridge.info().then(render).catch(function () { /* not allowed on this origin */ });
+    bridge.info().then(function (info) {
+      render(info);
+      publishStatus(info);
+    }).catch(function () { /* not allowed on this origin */ });
   }
   setInterval(tick, 5000);
   if (document.readyState === 'loading') {

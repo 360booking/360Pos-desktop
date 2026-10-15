@@ -37,7 +37,6 @@ import {
   SUPPORTED_BAUDS,
   TILL_MODELS,
   buildRuntimeConfig,
-  classifyProbe,
   completeOnOpen,
   defaultsForModel,
   deriveSteps,
@@ -49,7 +48,6 @@ import {
   isRealProvider,
   linkLine,
   linkSummary,
-  orderPortsForSearch,
   portLabel,
   isoToDdmmyy,
   localIsoDate,
@@ -57,17 +55,18 @@ import {
   previousMonthRange,
   printerAnswer,
   printerNotice,
-  probeToForm,
-  summariseSearch,
+  registerChips,
+  summariseDetect,
+  detectProgressText,
   tillSummary,
   vatLabel,
   type AutoLinkState,
   type Explained,
   type GuideForm,
   type LocalCheck,
+  type DetectProgress,
+  type DetectSummary,
   type PortInfo,
-  type ProbeReport,
-  type SearchSummary,
   type StepState,
 } from './logic';
 import { ServiceSection } from './ServiceSection';
@@ -120,9 +119,8 @@ export function FiscalGuide() {
   const [protocol, setProtocol] = useState<Record<string, unknown> | null>(null);
 
   // ------------------------------------------------------------ step 1
-  const [search, setSearch] = useState<{ port: string; baud: number; i: number; total: number; since: number } | null>(null);
-  const [searchResult, setSearchResult] = useState<SearchSummary | null>(null);
-  const stopSearch = useRef(false);
+  const [search, setSearch] = useState<{ progress: DetectProgress | null } | null>(null);
+  const [searchResult, setSearchResult] = useState<DetectSummary | null>(null);
   const [manual, setManual] = useState(false);
   const [portsBusy, setPortsBusy] = useState(false);
   const [saveTest, setSaveTest] = useState<Outcome>(IDLE);
@@ -252,11 +250,12 @@ export function FiscalGuide() {
   }, [reloadConfig, refreshHealth]);
 
   // seconds counter while searching
+  const searchActive = search !== null;
   useEffect(() => {
-    if (!search) return;
+    if (!searchActive) return;
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [search]);
+  }, [searchActive]);
 
   // ------------------------------------------------------------ derived
   const configSaved = Boolean(cfg?.updated_at);
@@ -269,6 +268,7 @@ export function FiscalGuide() {
   const connError = enrolled && !connected ? (bridge?.last_error ?? health?.agent.lastError ?? null) : null;
   const answer = printerAnswer(health?.printer ?? null, localCheck);
   const notice = printerNotice(health?.printer ?? null);
+  const chips = health?.printer.monitored ? registerChips(health.printer.register) : [];
   const tillConfigured = configSaved && isRealProvider(cfg?.provider) && Boolean(cfg?.serial_port);
   const { steps, current } = deriveSteps({
     configSaved,
@@ -302,52 +302,62 @@ export function FiscalGuide() {
     }
   }
 
-  async function autoSearch() {
-    stopSearch.current = false;
+  /** „Caută casa automat” — the app probes the ports itself (STATUS only)
+   *  and saves port + speed when the register answers. `includeOthers` =
+   *  the owner confirmed „Încearcă și celelalte porturi”. */
+  async function autoSearch(includeOthers = false) {
     setSearchResult(null);
     setSaveTest(IDLE);
-    let list: PortInfo[] = [];
+    setTick(0);
+    setSearch({ progress: null });
+    const unlisten = await guideApi
+      .onDetectProgress((p) => {
+        setSearch({ progress: p });
+      })
+      .catch(() => null);
     try {
-      list = await listPorts();
-      setPorts(list);
-    } catch (err) {
-      logger.warn('fiscal-guide', 'listPorts failed', { err: String(err) });
-    }
-    const ordered = orderPortsForSearch(list, form.serial_port ?? cfg?.serial_port ?? null);
-    const baud = model?.defaults.baud ?? 115200;
-    const reports: ProbeReport[] = [];
-    for (let i = 0; i < ordered.length; i++) {
-      if (stopSearch.current) break;
-      const p = ordered[i];
-      setTick(0);
-      setSearch({ port: p.name, baud, i: i + 1, total: ordered.length, since: nowSec() });
-      try {
-        const r = await guideApi.probe(p.name, baud);
-        reports.push(r);
-        logger.info('fiscal-guide', 'probe', {
-          port: p.name,
-          outcome: classifyProbe(r),
-          dialect: r.recommended_dialect,
-          baud: r.recommended_baud,
-        });
-        const hit = probeToForm(r);
-        if (hit) {
-          setForm((f) => ({ ...f, ...hit }));
-          break;
+      const r = await guideApi.detect(includeOthers);
+      logger.info('fiscal-guide', 'detect', {
+        found: r.found?.port ?? null,
+        baud: r.found?.baud ?? null,
+        dialect: r.found?.dialect ?? null,
+        vid: r.found?.vid ?? null,
+        pid: r.found?.pid ?? null,
+        saved: r.saved,
+        tried: r.tried.map((t) => `${t.port}:${t.outcome}`),
+        not_tried: r.not_tried.map((t) => t.port),
+        excluded: r.excluded.map((t) => t.port),
+      });
+      if (r.found) {
+        const f = r.found;
+        setForm((cur) => ({ ...cur, serial_port: f.port, baud: f.baud, protocol_variant: f.dialect }));
+        if (r.saved) {
+          setLocalCheck({ ok: true, at: nowSec() });
+          try {
+            setCfg(await getFiscalRuntimeConfig());
+          } catch {
+            /* shown again on the next load */
+          }
+          await enableRustFiscalIfAllowed().catch(() => false);
         }
-      } catch (err) {
-        reports.push({
-          port: p.name,
-          configured_baud: baud,
-          attempts: [{ dialect: '-', baud, ok: false, error: errText(err) }],
-          recommended_dialect: null,
-          recommended_baud: null,
-          all_nak_hint: false,
-        });
       }
+      setSearchResult(summariseDetect(r));
+    } catch (err) {
+      setSearchResult({
+        ok: false,
+        title: 'Căutarea nu a putut porni.',
+        checks: [errText(err)],
+        askOthers: false,
+        notice: null,
+      });
+    } finally {
+      unlisten?.();
+      setSearch(null);
+      void listPorts()
+        .then(setPorts)
+        .catch(() => {});
+      refreshHealth();
     }
-    setSearch(null);
-    setSearchResult(stopSearch.current && !reports.some((r) => probeToForm(r)) ? null : summariseSearch(reports, list.length));
   }
 
   async function saveAndTest() {
@@ -540,6 +550,20 @@ export function FiscalGuide() {
               </span>
             ) : null}
           </div>
+          {chips.length > 0 ? (
+            <div className="flex basis-full flex-wrap gap-1.5" aria-label="Starea casei">
+              {chips.map((c) => (
+                <span
+                  key={c.text}
+                  className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    c.tone === 'bad' ? 'bg-rose-500/20 text-rose-200' : 'bg-amber-400/20 text-amber-200'
+                  }`}
+                >
+                  {c.text}
+                </span>
+              ))}
+            </div>
+          ) : null}
           {notice ? <div className="basis-full text-xs text-amber-300">{notice}</div> : null}
           <div className="flex items-center gap-2 text-sm">
             <Dot tone={linkS.tone} />
@@ -654,11 +678,11 @@ export function FiscalGuide() {
               <h4 className="text-sm font-semibold text-slate-200">Unde e legată de calculator?</h4>
               <p className="text-xs text-slate-400">Casa trebuie să fie pornită și legată cu cablul USB.</p>
               <div className="flex flex-wrap items-center gap-2">
-                <button className={btnPrimary} onClick={() => void autoSearch()} disabled={searching || !model?.supported}>
+                <button className={btnPrimary} onClick={() => void autoSearch(false)} disabled={searching || !model?.supported}>
                   {searching ? <Spinner /> : <Search className="h-4 w-4" />} Caută casa automat
                 </button>
                 {searching ? (
-                  <button className={btnSecondary} onClick={() => (stopSearch.current = true)}>
+                  <button className={btnSecondary} onClick={() => void guideApi.cancelDetect().catch(() => {})}>
                     Oprește căutarea
                   </button>
                 ) : (
@@ -678,15 +702,31 @@ export function FiscalGuide() {
                   <Spinner className="mt-0.5 h-4 w-4 shrink-0" />
                   <div>
                     <div className="font-semibold">
-                      Încerc {search.port} la {search.baud}…
+                      {search.progress ? detectProgressText(search.progress).title : 'Caut porturile casei…'}
                     </div>
                     <div className="text-xs text-sky-200/70">
-                      Portul {search.i} din {search.total} · apoi celelalte viteze · {tick} s
+                      {search.progress ? detectProgressText(search.progress).sub : 'doar citesc starea casei, nu tipăresc nimic'} · {tick} s
                     </div>
                   </div>
                 </div>
               )}
-              {searchResult && !search && (searchResult.ok ? <OkBox>{searchResult.title}</OkBox> : <ProblemBox e={searchResult} />)}
+              {searchResult && !search && (
+                <div className="space-y-2">
+                  {searchResult.ok ? (
+                    <OkBox>
+                      {searchResult.title}
+                      {searchResult.notice ? <div className="mt-1 text-amber-200">{searchResult.notice}</div> : null}
+                    </OkBox>
+                  ) : (
+                    <ProblemBox e={searchResult} />
+                  )}
+                  {searchResult.askOthers ? (
+                    <button className={btnSecondary} onClick={() => void autoSearch(true)} disabled={searching}>
+                      <Search className="h-4 w-4" /> Încearcă și celelalte porturi
+                    </button>
+                  ) : null}
+                </div>
+              )}
 
               {manual && !searching && (
                 <div className="grid gap-3 rounded-lg border border-slate-800 bg-slate-900/60 p-3 sm:grid-cols-[1fr_auto_160px] sm:items-end">

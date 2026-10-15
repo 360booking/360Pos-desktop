@@ -53,6 +53,10 @@ pub struct DatecsTransportConfig {
     /// itself). The legacy FP-55 documentation said LEN = body only. Set to
     /// true for DP-25X-compatible builds.
     pub len_includes_self: bool,
+    /// Shortest time a reply is waited for, whatever `timeout` says. 3 s
+    /// for real work (a receipt line can take a moment); zero for the
+    /// automatic search, where a silent port must be given up quickly.
+    pub min_wait: Duration,
 }
 
 impl DatecsTransportConfig {
@@ -78,6 +82,7 @@ impl DatecsTransportConfig {
             bcc_coverage: BccCoverage::LenBody,
             cmd_width: 4,
             len_includes_self: true,
+            min_wait: Duration::from_secs(3),
         }
     }
 
@@ -94,6 +99,7 @@ impl DatecsTransportConfig {
             bcc_coverage: BccCoverage::Body,
             cmd_width: 1,
             len_includes_self: false,
+            min_wait: Duration::from_secs(3),
         }
     }
 }
@@ -220,7 +226,7 @@ impl DatecsFpTransport {
             detail: "port not open".into(),
         })?;
         let mut buf: Vec<u8> = Vec::new();
-        let deadline = Instant::now() + self.cfg.timeout.max(Duration::from_secs(3));
+        let deadline = Instant::now() + self.cfg.timeout.max(self.cfg.min_wait);
         let mut byte = [0u8; 1];
         while Instant::now() < deadline {
             match port.read(&mut byte) {

@@ -14,6 +14,7 @@ pub mod credentials;
 pub mod diagnostics;
 pub mod dto;
 pub mod error;
+pub mod health;
 pub mod mapping;
 pub mod persist;
 pub mod provider;

@@ -10,7 +10,11 @@
 // enrolment in the fiscal window (Ctrl+Shift+F) saves credentials.
 //
 // Printer watchdog: while the Rust agent owns the device, a STATUS poll
-// (silent, non-fiscal) runs every 20s (60s after repeated failures). The
+// (silent, non-fiscal) runs every 40s (60s after repeated failures), only
+// when the device is idle (try-lock: never between the steps of a job).
+// The decoded result (paper, cover, Z necesar, …) is kept as
+// `register` (fiscal::health) for the web POS, this window and the
+// heartbeat. The
 // transport opens the COM port per operation, so when the cable/USB comes
 // back the next poll — and the next receipt — simply work again; the
 // watchdog makes that state visible (pill in the POS, fiscal window).
@@ -25,6 +29,7 @@ use crate::fiscal::bridge_client::state::{now_unix, token_hash};
 use crate::fiscal::commands::{fiscal_bridge_run, fiscal_bridge_state, running_token_hash};
 use crate::fiscal::credentials;
 use crate::fiscal::diagnostics::probe::list_ports;
+use crate::fiscal::health::{self as fiscal_health, RegisterStatus};
 use crate::fiscal::persist;
 use crate::fiscal::providers;
 use crate::fiscal::runtime_config;
@@ -44,6 +49,9 @@ pub struct FiscalHealth {
     pub last_check_at: Option<u64>,
     pub consecutive_failures: u32,
     pub last_error: Option<String>,
+    /// What the register reports (decoded STATUS + „Z necesar”); None when
+    /// not monitored. Same object the heartbeat sends as `printer`.
+    pub register: Option<RegisterStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,9 +82,28 @@ pub fn health() -> FiscalHealth {
 }
 
 fn set_health(h: FiscalHealth) {
+    fiscal_health::set_latest(h.register.clone());
     if let Ok(mut g) = HEALTH.lock() {
         *g = Some(h);
     }
+}
+
+/// Romanian reason for a STATUS that got no answer.
+fn no_answer_text(port: Option<&str>, port_present: Option<bool>, err: &str) -> String {
+    let t = err.to_lowercase();
+    if port_present == Some(false) {
+        return format!(
+            "Portul {} nu mai există — verifică cablul USB al casei.",
+            port.unwrap_or("casei")
+        );
+    }
+    if t.contains("denied") || t.contains("busy") || t.contains("in use") || t.contains("os error 5") {
+        return "Portul casei e ocupat de alt program (DUDE, alt program de facturare).".into();
+    }
+    if t.contains("casa a refuzat") {
+        return err.to_string();
+    }
+    "Casa de marcat nu răspunde — e pornită și are cablul prins?".into()
 }
 
 fn has_saved_credentials(app: &AppHandle) -> bool {
@@ -176,6 +203,7 @@ fn check_printer(app: &AppHandle) {
         set_health(FiscalHealth {
             monitored: false,
             provider: "neconfigurat".into(),
+            register: None,
             ..base
         });
         return;
@@ -196,20 +224,26 @@ fn check_printer(app: &AppHandle) {
             port,
             online: if allowed { Some(true) } else { None },
             last_error: if allowed { None } else { Some(runtime_config::NOT_CONFIGURED_RO.into()) },
+            register: None,
             ..base
         });
         return;
     }
-    if providers::device_busy() {
-        return; // a receipt is printing — never queue a poll behind it
-    }
+    // Idle only: a receipt / job holds the lock → skip this round instead
+    // of queueing a poll behind it (or between its steps).
+    let Some(_device) = providers::try_device_lock() else {
+        return;
+    };
     let port_present = port.as_ref().map(|p| {
         let ports = list_ports();
         ports.is_empty() || ports.iter().any(|x| x.eq_ignore_ascii_case(p))
     });
-    let result = providers::build(&provider, &cfg).and_then(|p| p.get_status());
+    // Unlocked provider: we hold the device guard already.
+    let result = providers::build_unlocked(&provider, &cfg).and_then(|p| p.get_status());
+    let z_required = providers::z_report_required();
     match result {
         Ok(s) => {
+            let register = fiscal_health::from_status(&s, z_required, now);
             if prev.consecutive_failures >= 2 {
                 log::info!("agent: fiscal printer is answering again on {:?}", port);
             }
@@ -223,7 +257,8 @@ fn check_printer(app: &AppHandle) {
                 last_ok_at: Some(now),
                 last_check_at: Some(now),
                 consecutive_failures: 0,
-                last_error: s.error_message.or(s.error_code),
+                last_error: register.message.clone().or(s.error_message).or(s.error_code),
+                register: Some(register),
             });
         }
         Err(e) => {
@@ -235,6 +270,11 @@ fn check_printer(app: &AppHandle) {
                 Some(false) => format!("Portul {} nu mai există (cablu/USB?). {e}", port.clone().unwrap_or_default()),
                 _ => e.to_string(),
             };
+            let register = fiscal_health::no_answer(
+                no_answer_text(port.as_deref(), port_present, &e.to_string()),
+                z_required,
+                now,
+            );
             set_health(FiscalHealth {
                 monitored: true,
                 provider,
@@ -246,6 +286,7 @@ fn check_printer(app: &AppHandle) {
                 last_check_at: Some(now),
                 consecutive_failures: failures,
                 last_error: Some(hint),
+                register: Some(register),
             });
         }
     }
@@ -266,8 +307,10 @@ pub fn start(app: &AppHandle) {
                 if tick % 3 == 0 {
                     supervise_rust_agent(&app);
                 }
+                // 40 s while it answers, 60 s after repeated failures.
                 let failing = health().consecutive_failures >= 3;
-                if !failing || tick % 3 == 0 {
+                let due = if failing { tick % 3 == 0 } else { tick % 2 == 0 };
+                if due {
                     check_printer(&app);
                 }
                 tick = tick.wrapping_add(1);

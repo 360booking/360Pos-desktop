@@ -9,6 +9,10 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 
+import type { RegisterStatus } from '@/features/settings/fiscal-guide/logic';
+
+export type { RegisterStatus };
+
 export interface ShellConfig {
   mode: 'web' | 'legacy';
   tenantUrl: string;
@@ -43,6 +47,8 @@ export interface FiscalHealth {
   lastCheckAt: number | null;
   consecutiveFailures: number;
   lastError: string | null;
+  /** Decoded register status (paper, cover, Z necesar…); absent on older builds. */
+  register?: RegisterStatus | null;
 }
 
 export interface AgentSummary {

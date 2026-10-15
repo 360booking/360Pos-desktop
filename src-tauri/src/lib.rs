@@ -208,6 +208,8 @@ pub fn run() {
             fiscal::commands::fiscal_probe,
             fiscal::commands::fiscal_list_ports,
             fiscal::commands::fiscal_list_ports_detailed,
+            fiscal::commands::fiscal_detect_register,
+            fiscal::commands::fiscal_detect_cancel,
             fiscal::commands::fiscal_raw_debug,
             fiscal::commands::fiscal_debug_credentials,
             fiscal::commands::fiscal_bridge_claim,

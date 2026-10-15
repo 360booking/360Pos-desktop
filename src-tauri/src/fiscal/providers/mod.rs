@@ -1,10 +1,11 @@
 pub mod datecs_dp25;
 pub mod simulator;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use crate::fiscal::dto::{
-    CancelReceiptRequest, FiscalStatus, ReceiptRequest, ReceiptResponse, TestResult,
+    CancelReceiptRequest, FiscalStatus, ReceiptRequest, ReceiptResponse, ReceiptStatus, TestResult,
 };
 use crate::fiscal::error::FiscalError;
 use crate::fiscal::provider::FiscalPrinterProvider;
@@ -15,6 +16,17 @@ use crate::fiscal::runtime_config::{self, RuntimeConfig};
 /// `RuntimeConfig` once via `runtime_config::read` and hands it down so a
 /// single SQLite hit covers `provider`, `serial_port`, `baud`, etc.
 pub fn build(
+    name: &str,
+    cfg: &RuntimeConfig,
+) -> Result<Box<dyn FiscalPrinterProvider>, FiscalError> {
+    Ok(Box::new(DeviceLocked(build_unlocked(name, cfg)?)))
+}
+
+/// The provider WITHOUT the device lock. Only for a caller that already
+/// holds the guard from `try_device_lock()` / `device_lock()` (the status
+/// watchdog, the automatic search): the lock is not re-entrant, so the
+/// locked wrapper would deadlock there.
+pub fn build_unlocked(
     name: &str,
     cfg: &RuntimeConfig,
 ) -> Result<Box<dyn FiscalPrinterProvider>, FiscalError> {
@@ -32,7 +44,7 @@ pub fn build(
             })
         }
     };
-    Ok(Box::new(DeviceLocked(inner)))
+    Ok(inner)
 }
 
 // ---------------------------------------------------------------------------
@@ -53,10 +65,56 @@ pub fn device_lock() -> MutexGuard<'static, ()> {
     DEVICE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// True while another operation is talking to the device. Used by the
-/// watchdog so a status poll never queues behind a receipt.
-pub fn device_busy() -> bool {
-    matches!(DEVICE_LOCK.try_lock(), Err(TryLockError::WouldBlock))
+/// The device if it is free right now, else None (never waits). The
+/// watchdog takes it this way so a status poll never sits between the
+/// steps of a job or delays a receipt.
+pub fn try_device_lock() -> Option<MutexGuard<'static, ()>> {
+    match DEVICE_LOCK.try_lock() {
+        Ok(g) => Some(g),
+        Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// „Raport Z necesar” — the DP-25X has no status bit for it: it only refuses
+// to open a receipt with ErrorCode -111024 once 24 h passed since the first
+// sale after the last Z. Every device operation goes through DeviceLocked,
+// so this is where we learn it (sticky until a Z or a receipt succeeds).
+
+static Z_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Last receipt/storno was refused with „raport Z necesar” and no Z (and no
+/// successful receipt) happened since.
+pub fn z_report_required() -> bool {
+    Z_REQUIRED.load(Ordering::Relaxed)
+}
+
+/// DP-25X ErrorCode for „Z report required (24 h)” — see datecs_errors.rs.
+pub const Z_REQUIRED_CODE: i64 = -111024;
+
+fn note_outcome<T>(r: &Result<T, FiscalError>, clears: bool) {
+    match r {
+        Err(FiscalError::Device { code, .. }) if *code == Z_REQUIRED_CODE => {
+            if !Z_REQUIRED.swap(true, Ordering::Relaxed) {
+                log::warn!("fiscal: the register asks for a Z report (code {Z_REQUIRED_CODE})");
+            }
+        }
+        Ok(_) if clears => {
+            if Z_REQUIRED.swap(false, Ordering::Relaxed) {
+                log::info!("fiscal: Z report no longer required");
+            }
+        }
+        _ => {}
+    }
+}
+
+fn printed(r: &Result<ReceiptResponse, FiscalError>) -> Result<(), FiscalError> {
+    match r {
+        Ok(resp) if matches!(resp.status, ReceiptStatus::Printed) => Ok(()),
+        Ok(_) => Err(FiscalError::Other { detail: "not printed".into() }),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 struct DeviceLocked(Box<dyn FiscalPrinterProvider>);
@@ -75,15 +133,21 @@ impl FiscalPrinterProvider for DeviceLocked {
     }
     fn print_receipt(&self, req: ReceiptRequest) -> Result<ReceiptResponse, FiscalError> {
         let _g = device_lock();
-        self.0.print_receipt(req)
+        let r = self.0.print_receipt(req);
+        note_outcome(&printed(&r), true);
+        r
     }
     fn cancel_receipt(&self, req: CancelReceiptRequest) -> Result<ReceiptResponse, FiscalError> {
         let _g = device_lock();
-        self.0.cancel_receipt(req)
+        let r = self.0.cancel_receipt(req);
+        note_outcome(&printed(&r), true);
+        r
     }
     fn print_z_report(&self, confirm_token: &str) -> Result<ReceiptResponse, FiscalError> {
         let _g = device_lock();
-        self.0.print_z_report(confirm_token)
+        let r = self.0.print_z_report(confirm_token);
+        note_outcome(&printed(&r), true);
+        r
     }
     fn print_x_report(&self) -> Result<ReceiptResponse, FiscalError> {
         let _g = device_lock();
@@ -119,5 +183,28 @@ mod lock_tests {
         assert_eq!(p.name(), "simulator");
         let _ = p.get_status();
         let _ = p.get_status();
+    }
+
+    #[test]
+    fn try_lock_is_none_while_held() {
+        let _g = device_lock();
+        assert!(try_device_lock().is_none());
+    }
+
+    #[test]
+    fn z_required_is_sticky_until_a_success() {
+        let refused: Result<(), FiscalError> = Err(FiscalError::Device {
+            code: Z_REQUIRED_CODE,
+            message: "Casa a refuzat bonul".into(),
+        });
+        let other: Result<(), FiscalError> = Err(FiscalError::Device { code: -111016, message: String::new() });
+        note_outcome(&refused, true);
+        assert!(z_report_required());
+        note_outcome(&other, true);
+        assert!(z_report_required(), "a later step's error does not clear it");
+        note_outcome(&Ok::<(), FiscalError>(()), false);
+        assert!(z_report_required(), "a status read does not clear it");
+        note_outcome(&Ok::<(), FiscalError>(()), true);
+        assert!(!z_report_required());
     }
 }

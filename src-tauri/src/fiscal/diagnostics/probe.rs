@@ -51,6 +51,9 @@ fn one(port: &str, baud: u32, dialect: &str) -> ProbeAttempt {
             ..DatecsTransportConfig::fp55(port, baud)
         },
     };
+    // One attempt at a time with every other device user (agent jobs,
+    // offline till, watchdog): never interleave with a receipt.
+    let _device = crate::fiscal::providers::device_lock();
     let mut t = DatecsFpTransport::new(cfg);
     if let Err(e) = t.open() {
         return ProbeAttempt {
