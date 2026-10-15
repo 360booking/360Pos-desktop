@@ -14,12 +14,16 @@ import {
   formFromConfig,
   formProblem,
   groupARate,
+  isoToDdmmyy,
+  periodicRangeProblem,
+  previousMonthRange,
   linkSummary,
   modelFromConfig,
   normaliseEnrollmentCode,
   orderPortsForSearch,
   portLabel,
   printerAnswer,
+  printerNotice,
   probeToForm,
   summariseSearch,
   tillSummary,
@@ -188,6 +192,24 @@ describe('summary labels', () => {
     expect(printerAnswer({ monitored: true, online: false, lastCheckAt: 30 }, { ok: true, at: 20 })).toBe(false);
   });
 
+  it('shows what the answering register reports about itself', () => {
+    const h = (over: Partial<{ monitored: boolean; online: boolean | null; lastError: string | null }>) => ({
+      monitored: true,
+      online: true,
+      lastCheckAt: 10,
+      lastError: null,
+      ...over,
+    });
+    expect(printerNotice(null)).toBeNull();
+    expect(printerNotice(h({}))).toBeNull();
+    expect(printerNotice(h({ lastError: 'Casa nu mai are hârtie — pune o rolă nouă și închide capacul.' }))).toBe(
+      'Casa nu mai are hârtie — pune o rolă nouă și închide capacul.',
+    );
+    // Not answering: the connection error belongs to the other line.
+    expect(printerNotice(h({ online: false, lastError: 'Portul COM4 nu mai există' }))).toBeNull();
+    expect(printerNotice(h({ monitored: false, lastError: 'x' }))).toBeNull();
+  });
+
   it('words the till and link state plainly', () => {
     expect(tillSummary(false, null).text).toBe('neconfigurată');
     expect(tillSummary(true, true)).toEqual({ text: 'răspunde', tone: 'ok' });
@@ -339,5 +361,26 @@ describe('VAT label of the test bill', () => {
 
   it('never shows the outdated 19% unless the restaurant config says so', () => {
     expect(vatLabel(null, { protocol: 'fp55' })).not.toBe('TVA 19%');
+  });
+});
+
+describe('periodic report range', () => {
+  it('defaults to the previous calendar month', () => {
+    expect(previousMonthRange(new Date(2026, 9, 15))).toEqual({ from: '2026-09-01', to: '2026-09-30' });
+    expect(previousMonthRange(new Date(2026, 0, 3))).toEqual({ from: '2025-12-01', to: '2025-12-31' });
+    expect(previousMonthRange(new Date(2028, 2, 1))).toEqual({ from: '2028-02-01', to: '2028-02-29' });
+  });
+
+  it('converts ISO dates to DDMMYY for the agent', () => {
+    expect(isoToDdmmyy('2026-10-01')).toBe('011026');
+    expect(isoToDdmmyy('')).toBeNull();
+    expect(isoToDdmmyy('01.10.2026')).toBeNull();
+  });
+
+  it('explains a bad range in Romanian', () => {
+    expect(periodicRangeProblem('2026-09-01', '2026-09-30', '2026-10-15')).toBeNull();
+    expect(periodicRangeProblem('', '2026-09-30', '2026-10-15')).toMatch(/Alege/);
+    expect(periodicRangeProblem('2026-09-30', '2026-09-01', '2026-10-15')).toMatch(/după/);
+    expect(periodicRangeProblem('2026-10-01', '2026-10-16', '2026-10-15')).toMatch(/viitor/);
   });
 });

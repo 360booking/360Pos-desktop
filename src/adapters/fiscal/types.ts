@@ -26,10 +26,16 @@ export interface FiscalCancelRequest {
   mutationId: string;
   orderId: string;
   fiscalAttemptId: string;
-  /** Original receipt fiscal number (BF) being voided. */
+  /** The register's number of the original receipt (1…9999999). */
   originalFiscalNumber: string;
-  /** Original receipt date `YYYY-MM-DD` — required by some Datecs firmwares. */
+  /** Date + time of the original receipt, Romanian local time
+   *  (`YYYY-MM-DDTHH:MM:SS`). Mandatory on the DP-25X (storno cmd 0x2B). */
   originalFiscalDate?: string;
+  /** Fiscal memory number of the register that printed the original; when
+   *  absent the agent reads it from the connected register. */
+  originalFmNumber?: string;
+  /** DP-25X storno reason: refund (default) / operator_error / tax_base_reduction. */
+  stornoType?: 'refund' | 'operator_error' | 'tax_base_reduction';
   lines: FiscalLine[];
   payments: FiscalPayment[];
   reason: string;

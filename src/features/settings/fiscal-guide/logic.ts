@@ -607,6 +607,48 @@ export function printerAnswer(health: HealthLike | null, local: LocalCheck | nul
   return null;
 }
 
+/** What the register itself reports while it answers (paper out, cover
+ *  open, a bon left open, paper almost out — decoded from the DP-25X status
+ *  bytes by the agent). Null when it does not answer: the connection error
+ *  is shown elsewhere. */
+export function printerNotice(
+  health: (HealthLike & { lastError: string | null }) | null,
+): string | null {
+  if (!health || !health.monitored || health.online !== true) return null;
+  const msg = (health.lastError ?? '').trim();
+  return msg ? msg : null;
+}
+
+// ------------------------------------------- periodic report (2026-10-15)
+
+/** Local calendar date as ISO `YYYY-MM-DD` (not the UTC one). */
+export function localIsoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Default range of the fiscal memory report: the previous calendar month
+ *  (the monthly readout), as ISO dates for `<input type="date">`. */
+export function previousMonthRange(today: Date): { from: string; to: string } {
+  const y = today.getFullYear();
+  const m = today.getMonth(); // 0-based: previous month = m - 1
+  return { from: localIsoDate(new Date(y, m - 1, 1)), to: localIsoDate(new Date(y, m, 0)) };
+}
+
+/** ISO `YYYY-MM-DD` → `DDMMYY`, the date form the agent's periodic report
+ *  takes (it sends DD-MM-YY to the DP-25X, cmd 0x5E). Null when not ISO. */
+export function isoToDdmmyy(iso: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
+  return m ? `${m[3]}${m[2]}${m[1].slice(2)}` : null;
+}
+
+/** What is wrong with the chosen range, in Romanian; null when it is fine. */
+export function periodicRangeProblem(from: string, to: string, todayIso: string): string | null {
+  if (!isoToDdmmyy(from) || !isoToDdmmyy(to)) return 'Alege data de început și data de sfârșit.';
+  if (from > to) return 'Data de început e după data de sfârșit.';
+  if (to > todayIso) return 'Data de sfârșit nu poate fi în viitor.';
+  return null;
+}
+
 export type Tone = 'ok' | 'bad' | 'wait' | 'off';
 
 export function tillSummary(configured: boolean, answer: boolean | null): { text: string; tone: Tone } {

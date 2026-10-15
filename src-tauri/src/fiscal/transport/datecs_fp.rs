@@ -17,7 +17,6 @@
 use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
-use serialport::SerialPort;
 
 use crate::fiscal::error::FiscalError;
 
@@ -107,9 +106,14 @@ pub struct FrameResponse {
     pub raw: Vec<u8>,
 }
 
+/// The byte stream the transport talks over: the serial port in the app, a
+/// scripted fake register in unit tests.
+pub trait PortIo: Read + Write + Send {}
+impl<T: Read + Write + Send + ?Sized> PortIo for T {}
+
 pub struct DatecsFpTransport {
     cfg: DatecsTransportConfig,
-    port: Option<Box<dyn SerialPort>>,
+    port: Option<Box<dyn PortIo>>,
     seq: u8,
 }
 
@@ -144,8 +148,14 @@ impl DatecsFpTransport {
         let _ = port.write_data_terminal_ready(false);
         let _ = port.write_request_to_send(false);
         let _ = port.clear(serialport::ClearBuffer::All);
-        self.port = Some(port);
+        self.port = Some(Box::new(port));
         Ok(())
+    }
+
+    /// Tests only: talk to `io` instead of a COM port (open() keeps it).
+    #[cfg(test)]
+    pub fn attach_for_test(&mut self, io: Box<dyn PortIo>) {
+        self.port = Some(io);
     }
 
     pub fn close(&mut self) {

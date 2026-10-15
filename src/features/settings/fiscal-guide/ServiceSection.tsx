@@ -74,7 +74,8 @@ function AgentPanel({ health }: { health: { printer: FiscalHealth; agent: AgentS
         {p?.port ? ` · ${p.port}` : ''} · monitorizată: {p?.monitored ? 'da' : 'nu'} · ultimul răspuns {ago(p?.lastOkAt ?? null)} ·
         verificat {ago(p?.lastCheckAt ?? null)}
       </div>
-      {p?.lastError && !p.online ? <div className="text-xs text-amber-300">{p.lastError}</div> : null}
+      {/* Not answering: why. Answering: what the register reports (paper, cover, open bon). */}
+      {p?.lastError ? <div className="text-xs text-amber-300">{p.lastError}</div> : null}
     </div>
   );
 }

@@ -171,6 +171,12 @@ export const shellApi = {
     invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>('fiscal_print_z_report', {
       confirmToken,
     }),
+  /** Fiscal memory report between two dates (DDMMYY) — DP-25X cmd 0x5E. */
+  printPeriodicReport: (dateFrom: string, dateTo: string) =>
+    invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>(
+      'fiscal_print_periodic_memory',
+      { dateFrom, dateTo },
+    ),
   /** Plain-text report: version, settings, agent state, last ~200 log lines. */
   diagnostics: () => invoke<string>('fiscal_diagnostics'),
   /** Opens the log folder in Explorer; resolves to its path. */

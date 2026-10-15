@@ -1,5 +1,8 @@
 // Datecs DP-25 driver — port of fiscal-bridge/bridge/printers/datecs_dp25.py.
-// Speaks FP-55 dialect by default; FP-700 selectable via DatecsConfig.
+// Default: the DP-25X / FP-700X "X dialect" (Datecs FMP-350X/FMP-55X/FP-700X/
+// DP-25X/DP-150X Programmer's Manual v2.02): storno 0x2B, report by date
+// 0x5E, free fiscal text 0x36, 8 status bytes inside every answer. The old
+// FP-55/FP-700 frames stay behind `variant_fp700` (legacy, unverified).
 
 use std::sync::Mutex;
 
@@ -8,7 +11,7 @@ use crate::fiscal::dto::{
     ReceiptResponse, ReceiptStatus, TestResult,
 };
 use crate::fiscal::error::FiscalError;
-use crate::fiscal::mapping::{datecs_errors, payment, status as status_dec, vat};
+use crate::fiscal::mapping::{datecs_errors, datecs_params, payment, status as status_dec, vat};
 use crate::fiscal::provider::FiscalPrinterProvider;
 use crate::fiscal::transport::datecs_fp::{
     parse_error_code, reply_fields, reply_status_bytes, DatecsFpTransport, DatecsTransportConfig,
@@ -24,6 +27,9 @@ const ACT_DRAWER: &str = "deschiderea sertarului";
 const ACT_REPRINT: &str = "duplicatul bonului";
 const ACT_PERIODIC: &str = "raportul periodic";
 const ACT_STATUS: &str = "citirea stării";
+
+/// DP-25X ErrorCode for a frame whose parameters the firmware cannot parse.
+const SYNTAX_ERROR: i64 = -112001;
 
 /// Turn a framed reply into an error when the register refused the command
 /// (DP-25X ErrorCode < 0). A reply without an ErrorCode (legacy dialect,
@@ -78,11 +84,20 @@ pub struct CmdCodes {
     pub x_report: u16,
     pub z_report: u16,
     pub status: u16,
-    /// Sprint 2 / Q3 — Datecs FP-55/DP-25 storno cmd. Per programmer's manual
-    /// §3.5 the storno frame opens with `<op>\t<pwd>\t1\tS\t<original_BF>` and
-    /// re-registers the items being voided. Wire format is firmware-dependent
-    /// — verify on real hardware before going live (see fiscal-port-status §A2).
+    /// LEGACY `fp700` variant only: the old storno frame
+    /// `<op>\t<pwd>\t1\tS\t<BF>[\t<DD-MM-YY>]` on 0x32. On the DP-25X 0x32
+    /// is "Return the active VAT rates" — never a storno there; the X
+    /// dialect uses `storno_open` (0x2B).
     pub cancel_fiscal: u16,
+    /// DP-25X / FP-700X: "Opening of storno documents" (cmd 43, 2Bh).
+    pub storno_open: u16,
+    /// DP-25X / FP-700X: "Printing of a free fiscal text" (cmd 54, 36h) —
+    /// the only text command allowed inside a fiscal / storno receipt
+    /// (0x2A is for non-fiscal receipts).
+    pub fiscal_text: u16,
+    /// DP-25X / FP-700X: "Diagnostic information" (cmd 90, 5Ah) — its
+    /// answer ends with the fiscal memory number a storno must name.
+    pub device_info: u16,
     /// Pop the cash drawer pulse. Datecs FP-55/DP-25 maps this to 0x6A.
     /// Configurable so a tenant with a non-standard firmware can override
     /// without recompiling.
@@ -90,9 +105,12 @@ pub struct CmdCodes {
     /// Reprint the LAST fiscal receipt as a duplicate copy. 0x6D on FP-55
     /// per programmer's manual §3.7. Body is empty.
     pub reprint_last: u16,
-    /// Print a periodic-memory report between two dates. 0x4F on FP-55.
-    /// Payload is `<from>\t<to>` with dates DDMMYY (no separators).
+    /// LEGACY `fp700` variant only: periodic report 0x4F with
+    /// `<from>\t<to>` (DDMMYY). On the DP-25X 0x4F is not a report.
     pub periodic_memory: u16,
+    /// DP-25X / FP-700X: "Fiscal memory report by date" (cmd 94, 5Eh),
+    /// `{Type}<SEP>{Start}<SEP>{End}<SEP>` with DD-MM-YY dates.
+    pub periodic_by_date: u16,
     /// Cancel (void) the fiscal receipt that is open right now — 0x3C
     /// "Cancel fiscal receipt" (no parameters) on DP-25X / FP-700X and on
     /// the older FP-55/FP-700 protocol alike. Sent when a step fails after
@@ -117,9 +135,13 @@ impl Default for CmdCodes {
             z_report: 0x45,
             status: 0x4A,
             cancel_fiscal: 0x32,
+            storno_open: 0x2B,
+            fiscal_text: 0x36,
+            device_info: 0x5A,
             open_drawer: 0x6A,
             reprint_last: 0x6D,
             periodic_memory: 0x4F,
+            periodic_by_date: 0x5E,
             void_open_receipt: 0x3C,
         }
     }
@@ -253,24 +275,18 @@ impl DatecsDp25Provider {
         line.into_bytes()
     }
 
-    /// Storno open payload — Datecs FP-55 §3.5: `<op>\t<pwd>\t1\tS\t<BF>` with
-    /// optional `\t<DATE>` suffix on firmwares that require the original
-    /// fiscal-memory date. Date is `DD-MM-YY` per the manual; we accept
-    /// `YYYY-MM-DD` from the caller and reformat. Reason text is appended on
-    /// a print_text line later — keeps the open frame minimal.
-    fn build_cancel_open(&self, req: &CancelReceiptRequest) -> Vec<u8> {
+    /// LEGACY `fp700` variant storno open (0x32): `<op>\t<pwd>\t1\tS\t<BF>`
+    /// with an optional `\t<DD-MM-YY>` — the old FP-55 shape, unverified
+    /// and unused on the DP-25X (see `build_storno_open`).
+    fn build_cancel_open_legacy(&self, req: &CancelReceiptRequest) -> Vec<u8> {
         let mut frame = format!(
             "{}\t{}\t1\tS\t{}",
             self.cfg.operator, self.cfg.operator_password, req.original_fiscal_number,
         );
         if let Some(date) = req.original_fiscal_date.as_deref() {
-            // ISO `YYYY-MM-DD` → Datecs `DD-MM-YY`. If the input is already in
-            // Datecs format we leave it alone (length 8, hyphens at 3+6).
-            let datecs = if date.len() == 10 && date.as_bytes().get(4) == Some(&b'-') {
-                let yyyy = &date[0..4];
-                let mm = &date[5..7];
-                let dd = &date[8..10];
-                format!("{}-{}-{}", dd, mm, &yyyy[2..])
+            // ISO `YYYY-MM-DD[...]` → Datecs `DD-MM-YY`; anything else as is.
+            let datecs = if date.is_ascii() && date.len() >= 10 && date.as_bytes().get(4) == Some(&b'-') {
+                format!("{}-{}-{}", &date[8..10], &date[5..7], &date[2..4])
             } else {
                 date.to_string()
             };
@@ -280,19 +296,102 @@ impl DatecsDp25Provider {
         frame.into_bytes()
     }
 
-    /// Storno line — Datecs FP-55 §3.5: storno frames re-use the same
-    /// register_item shape; the firmware infers the sign from the `S`
-    /// discriminator in the storno open frame, NOT from the item line.
-    /// `fmt_amount` strips signs anyway, so this is a pass-through. Kept
-    /// as a separate helper for the call-site clarity (and to give us a
-    /// single hook if firmware variants ever require a different shape).
-    #[allow(dead_code)] // storno lines go through sell_after_open → build_register_item today
-    fn build_cancel_item(item: &ReceiptItem) -> Vec<u8> {
-        Self::build_register_item(item)
+    /// DP-25X storno open (cmd 43, 2Bh):
+    ///   {OpCode}<SEP>{OpPwd}<SEP>{TillNmb}<SEP>{Storno}<SEP>{DocNum}<SEP>
+    ///   {DateTime}<SEP>{FMNumber}<SEP>{Invoice}<SEP>{ToInvoice}<SEP>
+    ///   {Reason}<SEP>[{NSale}<SEP>]
+    /// Invoice / ToInvoice / Reason are only for invoice storno → empty.
+    /// NSale (the Bulgarian unique sale number) does not exist in Romania;
+    /// `with_nsale` adds it as an empty field, for a firmware that insists
+    /// on the full 11-field form (tried only after a syntax refusal).
+    fn build_storno_open(
+        &self,
+        reason_code: &str,
+        doc_number: &str,
+        datetime: &str,
+        fm_number: &str,
+        with_nsale: bool,
+    ) -> Vec<u8> {
+        let mut fields: Vec<&str> = vec![
+            self.cfg.operator.as_str(),
+            self.cfg.operator_password.as_str(),
+            "1",
+            reason_code,
+            doc_number,
+            datetime,
+            fm_number,
+            "",
+            "",
+            "",
+        ];
+        if with_nsale {
+            fields.push("");
+        }
+        let mut out = String::new();
+        for f in fields {
+            out.push_str(f);
+            out.push('\t');
+        }
+        out.into_bytes()
+    }
+
+    /// The register's fiscal memory number (cmd 90, 5Ah, param "1" — the
+    /// form ErpNet.FP reads it with). The answer ends with {FMNumber}.
+    fn read_fm_number(&self, t: &mut DatecsFpTransport) -> Result<String, FiscalError> {
+        let reply = self.exec(t, self.cfg.cmd_codes.device_info, b"1", ACT_STORNO, false)?;
+        let end = reply
+            .data
+            .iter()
+            .position(|b| *b == crate::fiscal::transport::datecs_fp::STATUS_SEP)
+            .unwrap_or(reply.data.len());
+        let text = String::from_utf8_lossy(&reply.data[..end]).to_string();
+        datecs_params::fm_number_from_device_info(&text).ok_or_else(|| {
+            log::warn!("Datecs DP-25: no FM number in the 0x5A answer: {text:?}");
+            FiscalError::InvalidCommand {
+                detail: "Nu am putut citi numărul memoriei fiscale de pe casă — storno-ul nu s-a trimis. \
+                         Trimite-ne diagnosticul din „Avansat (service)”."
+                    .into(),
+            }
+        })
+    }
+
+    /// Payments of a storno: as sent, but never more than the storno total
+    /// (a tip or a rounding on the original would make the register print
+    /// "REST" on a refund). Trimmed from the last payment backwards.
+    fn storno_payments(items: &[ReceiptItem], payments: &[ReceiptPayment]) -> Vec<ReceiptPayment> {
+        let total_cents: i64 = items
+            .iter()
+            .map(|i| (i.unit_price.abs() * i.quantity.abs() * 100.0).round() as i64)
+            .sum();
+        let mut out = Self::payments_or_cash(items, payments);
+        let mut paid: i64 = out.iter().map(|p| (p.amount.abs() * 100.0).round() as i64).sum();
+        while paid > total_cents {
+            let Some(last) = out.last_mut() else { break };
+            let cents = (last.amount.abs() * 100.0).round() as i64;
+            let excess = paid - total_cents;
+            if cents > excess {
+                last.amount = (cents - excess) as f64 / 100.0;
+                paid = total_cents;
+            } else {
+                paid -= cents;
+                out.pop();
+            }
+        }
+        out
     }
 
     fn build_print_text(text: &str) -> Vec<u8> {
         Self::cp1250(&Self::truncate(text, 36))
+    }
+
+    /// Free fiscal text inside a fiscal / storno receipt (cmd 54, 36h):
+    /// `{Text}<SEP>` — the optional Bold/Italic/… flags left out, as
+    /// ErpNet.FP AddComment does. Text ≤ PrintColumns-2; 30 fits the
+    /// DP-25X's 32-column paper.
+    fn build_fiscal_text(text: &str) -> Vec<u8> {
+        let mut line = Self::truncate(text, 30);
+        line.push('\t');
+        Self::cp1250(&line)
     }
 }
 
@@ -385,8 +484,15 @@ impl DatecsDp25Provider {
             self.exec(t, c.register_item, &data, action, false)?;
         }
         if let Some(text) = reason {
-            let line = Self::build_print_text(text);
-            self.exec(t, c.print_text, &line, action, false)?;
+            // X dialect: free FISCAL text (0x36) — 0x2A is refused inside a
+            // fiscal / storno receipt. Legacy: as before.
+            if self.x_dialect() {
+                let line = Self::build_fiscal_text(text);
+                self.exec(t, c.fiscal_text, &line, action, false)?;
+            } else {
+                let line = Self::build_print_text(text);
+                self.exec(t, c.print_text, &line, action, false)?;
+            }
         }
         // Subtotal is optional before payment. The X dialect wants
         // `{Print}<SEP>{Display}<SEP>{DiscountType}<SEP>{DiscountValue}<SEP>`
@@ -395,8 +501,8 @@ impl DatecsDp25Provider {
         if !self.x_dialect() {
             self.exec(t, c.subtotal, b"", action, false)?;
         }
-        for p in Self::payments_or_cash(items, payments) {
-            let data = Self::build_payment(&p);
+        for p in payments {
+            let data = Self::build_payment(p);
             self.exec(t, c.payment, &data, action, false)?;
         }
         self.exec(t, c.close_fiscal, b"", action, false)
@@ -418,19 +524,37 @@ impl DatecsDp25Provider {
     /// One whole fiscal document: open → (stop on refusal) → lines →
     /// payments → close; any failure after the open voids the receipt (0x3C)
     /// and returns the original error.
+    ///
+    /// `open_payloads` are alternative forms of the open frame, tried in
+    /// order ONLY while the register answers "syntax error" (-112001): a
+    /// refused open prints nothing, so trying the next form is safe.
     #[allow(clippy::too_many_arguments)]
     fn run_document(
         &self,
         t: &mut DatecsFpTransport,
         open_cmd: u16,
-        open_payload: &[u8],
+        open_payloads: &[Vec<u8>],
         items: &[ReceiptItem],
         payments: &[ReceiptPayment],
         reason: Option<&str>,
         action: &str,
     ) -> Result<(FrameResponse, FrameResponse), FiscalError> {
         // A refused open leaves nothing on the register: stop, send no items.
-        let open = self.exec(t, open_cmd, open_payload, action, true)?;
+        let mut opened: Option<Result<FrameResponse, FiscalError>> = None;
+        for (i, payload) in open_payloads.iter().enumerate() {
+            let r = self.exec(t, open_cmd, payload, action, true);
+            let syntax = matches!(r, Err(FiscalError::Device { code: SYNTAX_ERROR, .. }));
+            opened = Some(r);
+            if !syntax {
+                break;
+            }
+            if i + 1 < open_payloads.len() {
+                log::warn!("Datecs DP-25: open form {} refused as syntax error — trying the next form", i + 1);
+            }
+        }
+        let open = opened.unwrap_or_else(|| {
+            Err(FiscalError::InvalidCommand { detail: "no open frame".into() })
+        })?;
         match self.sell_after_open(t, items, payments, reason, action) {
             Ok(close) => {
                 // Legacy FP-55 `ER:NN` text marker, kept from the old path.
@@ -445,6 +569,63 @@ impl DatecsDp25Provider {
                 self.void_open_receipt(t);
                 Err(e)
             }
+        }
+    }
+
+    /// LEGACY `fp700` variant storno — the pre-DP-25X path, kept unchanged
+    /// (0x32 + `build_cancel_open_legacy`). Unverified on hardware.
+    fn cancel_receipt_legacy(
+        &self,
+        req: &CancelReceiptRequest,
+        reason: Option<&str>,
+    ) -> Result<ReceiptResponse, FiscalError> {
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let open_payload = self.build_cancel_open_legacy(req);
+        let payments = Self::payments_or_cash(&req.items, &req.payments);
+        let outcome = self.run_document(
+            &mut t,
+            self.cfg.cmd_codes.cancel_fiscal,
+            &[open_payload],
+            &req.items,
+            &payments,
+            reason,
+            ACT_STORNO,
+        );
+        t.close();
+        let (open, close) = outcome?;
+        let bf = self.fiscal_number(&open, &close);
+        Ok(ReceiptResponse {
+            status: ReceiptStatus::Printed,
+            fiscal_number: bf.clone(),
+            fiscal_date: Some(now_iso()),
+            raw_trace: format!(
+                "datecs_dp25 storno(legacy) mut={} order={} original={} new_bf={}",
+                req.mutation_id,
+                req.order_local_id,
+                req.original_fiscal_number,
+                bf.as_deref().unwrap_or("")
+            ),
+            error_code: None,
+            error_message: None,
+        })
+    }
+
+    /// Periodic report frame: (command, payload). X dialect: 0x5E
+    /// `0\t<DD-MM-YY>\t<DD-MM-YY>\t` (Type 0 = short). Legacy: 0x4F
+    /// `<from>\t<to>` exactly as received (DDMMYY), as before.
+    fn periodic_frame(&self, date_from: &str, date_to: &str) -> Result<(u16, Vec<u8>), FiscalError> {
+        if self.x_dialect() {
+            let (from, to) = datecs_params::period_range(date_from, date_to)?;
+            Ok((
+                self.cfg.cmd_codes.periodic_by_date,
+                format!("0\t{from}\t{to}\t").into_bytes(),
+            ))
+        } else {
+            Ok((
+                self.cfg.cmd_codes.periodic_memory,
+                format!("{date_from}\t{date_to}").into_bytes(),
+            ))
         }
     }
 
@@ -483,7 +664,14 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
         t.open()?;
         let r = self.exec(&mut t, self.cfg.cmd_codes.status, b"", ACT_STATUS, false);
         t.close();
-        Ok(status_dec::decode_minimal(&r?.status))
+        let r = r?;
+        // X dialect: the 8 status bytes travel inside DATA after 0x04; the
+        // legacy 6-byte field after POST is absent (all zeros) on DP-25X.
+        if self.x_dialect() {
+            Ok(status_dec::decode_x_minimal(reply_status_bytes(&r.data)))
+        } else {
+            Ok(status_dec::decode_minimal(&r.status))
+        }
     }
 
     fn print_receipt(&self, req: ReceiptRequest) -> Result<ReceiptResponse, FiscalError> {
@@ -496,12 +684,13 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
         let open_payload = self.build_open_fiscal();
+        let payments = Self::payments_or_cash(&req.items, &req.payments);
         let outcome = self.run_document(
             &mut t,
             self.cfg.cmd_codes.open_fiscal,
-            &open_payload,
+            &[open_payload],
             &req.items,
-            &req.payments,
+            &payments,
             None,
             ACT_RECEIPT,
         );
@@ -531,25 +720,61 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
                 detail: "no items on storno".into(),
             });
         }
-
-        let mut t = self.transport.lock().expect("transport mutex poisoned");
-        t.open()?;
-        let open_payload = self.build_cancel_open(&req);
         // Storno reason as a free-text line so the auditor sees it.
         let reason = if req.reason.trim().is_empty() {
             None
         } else {
             Some(req.reason.as_str())
         };
-        let outcome = self.run_document(
-            &mut t,
-            self.cfg.cmd_codes.cancel_fiscal,
-            &open_payload,
-            &req.items,
-            &req.payments,
-            reason,
-            ACT_STORNO,
-        );
+        if !self.x_dialect() {
+            return self.cancel_receipt_legacy(&req, reason);
+        }
+
+        // Everything that can be checked without the register first: a bad
+        // request never touches the COM port.
+        let reason_code = datecs_params::storno_reason_code(req.storno_type.as_deref())?;
+        let doc_number = datecs_params::storno_doc_number(&req.original_fiscal_number)?;
+        let (datetime, date_only) =
+            datecs_params::storno_datetime(req.original_fiscal_date.as_deref())?;
+        if date_only {
+            log::warn!(
+                "Datecs DP-25 storno {}: original receipt has a date but no time — sending {datetime}",
+                req.mutation_id
+            );
+        }
+        let fm_from_server = req
+            .original_fm_number
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(datecs_params::fm_number)
+            .transpose()?;
+        let payments = Self::storno_payments(&req.items, &req.payments);
+
+        let mut t = self.transport.lock().expect("transport mutex poisoned");
+        t.open()?;
+        let outcome = (|| {
+            let fm = match fm_from_server.clone() {
+                Some(fm) => fm,
+                None => self.read_fm_number(&mut t)?,
+            };
+            log::info!(
+                "Datecs DP-25 storno open: type={reason_code} doc={doc_number} date='{datetime}' fm={fm} (mutation {})",
+                req.mutation_id
+            );
+            let forms = [
+                self.build_storno_open(reason_code, &doc_number, &datetime, &fm, false),
+                self.build_storno_open(reason_code, &doc_number, &datetime, &fm, true),
+            ];
+            self.run_document(
+                &mut t,
+                self.cfg.cmd_codes.storno_open,
+                &forms,
+                &req.items,
+                &payments,
+                reason,
+                ACT_STORNO,
+            )
+        })();
         t.close();
         let (open, close) = outcome?;
         let bf = self.fiscal_number(&open, &close);
@@ -559,10 +784,11 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
             fiscal_number: bf.clone(),
             fiscal_date: Some(now_iso()),
             raw_trace: format!(
-                "datecs_dp25 storno mut={} order={} original={} new_bf={}",
+                "datecs_dp25 storno mut={} order={} original={} ({}) new_bf={}",
                 req.mutation_id,
                 req.order_local_id,
-                req.original_fiscal_number,
+                doc_number,
+                datetime,
                 bf.as_deref().unwrap_or("")
             ),
             error_code: None,
@@ -614,26 +840,18 @@ impl FiscalPrinterProvider for DatecsDp25Provider {
         date_from: &str,
         date_to: &str,
     ) -> Result<ReceiptResponse, FiscalError> {
-        // Periodic memory readout between two dates. FP-55 cmd 0x4F with
-        // payload `<from>\t<to>` where each date is DDMMYY (no separators).
-        // NOTE: the X dialect documents this report as 0x5E
-        // `{Type}<SEP>{Start}<SEP>{End}<SEP>` (DD-MM-YY) — not switched here
-        // (unverified on the register); a refusal now surfaces as an error.
+        // Fiscal memory report between two dates — see periodic_frame().
+        // Dates arrive as DDMMYY from the server (ISO / DD-MM-YY accepted
+        // on the X dialect); bad dates are refused before the COM port.
         if date_from.is_empty() || date_to.is_empty() {
             return Err(FiscalError::InvalidCommand {
                 detail: "periodic_memory: date_from and date_to are required".into(),
             });
         }
-        let payload = format!("{date_from}\t{date_to}");
+        let (cmd, payload) = self.periodic_frame(date_from, date_to)?;
         let mut t = self.transport.lock().expect("transport mutex poisoned");
         t.open()?;
-        let r = self.exec(
-            &mut t,
-            self.cfg.cmd_codes.periodic_memory,
-            payload.as_bytes(),
-            ACT_PERIODIC,
-            false,
-        );
+        let r = self.exec(&mut t, cmd, &payload, ACT_PERIODIC, false);
         t.close();
         let reply = r?;
         let dump = String::from_utf8_lossy(&reply.data).trim().to_string();
@@ -707,56 +925,106 @@ mod tests {
         assert!(parts[0].ends_with('…'));
     }
 
-    #[test]
-    fn cancel_open_iso_to_datecs_date() {
-        let p = DatecsDp25Provider::new(DatecsConfig {
-            serial_port: "COMx".into(), baud: 9600,
-            operator: "1".into(), operator_password: "0001".into(),
-            variant_fp700: false, cmd_codes: CmdCodes::default(),
-        });
-        let req = CancelReceiptRequest {
-            mutation_id: "m".into(), order_local_id: "o".into(),
+    fn storno_req(number: &str, date: Option<&str>) -> CancelReceiptRequest {
+        CancelReceiptRequest {
+            mutation_id: "storno-r1".into(), order_local_id: "o".into(),
             fiscal_attempt_id: "a".into(),
-            original_fiscal_number: "BF000123".into(),
-            original_fiscal_date: Some("2026-04-27".into()),
-            items: vec![], payments: vec![],
-            currency: "RON".into(), reason: "".into(),
-        };
-        let bytes = p.build_cancel_open(&req);
-        assert_eq!(
-            String::from_utf8_lossy(&bytes),
-            "1\t0001\t1\tS\tBF000123\t27-04-26",
-        );
+            original_fiscal_number: number.into(),
+            original_fiscal_date: date.map(Into::into),
+            original_fm_number: None,
+            storno_type: None,
+            items: vec![item("Cafea", 2.0, 5.0, 0.21)],
+            payments: vec![ReceiptPayment { method: PaymentMethod::Cash, amount: 10.0 }],
+            currency: "RON".into(), reason: "Retur client".into(),
+        }
     }
 
     #[test]
-    fn cancel_open_without_date() {
-        let p = DatecsDp25Provider::new(DatecsConfig {
-            serial_port: "COMx".into(), baud: 9600,
-            operator: "1".into(), operator_password: "0001".into(),
-            variant_fp700: false, cmd_codes: CmdCodes::default(),
-        });
-        let req = CancelReceiptRequest {
-            mutation_id: "m".into(), order_local_id: "o".into(),
-            fiscal_attempt_id: "a".into(),
-            original_fiscal_number: "BF000123".into(),
-            original_fiscal_date: None,
-            items: vec![], payments: vec![],
-            currency: "RON".into(), reason: "".into(),
-        };
-        let bytes = p.build_cancel_open(&req);
+    fn legacy_cancel_open_keeps_old_shape() {
+        let p = provider(true);
+        let bytes = p.build_cancel_open_legacy(&storno_req("BF000123", Some("2026-04-27")));
+        assert_eq!(String::from_utf8_lossy(&bytes), "1\t0001\t1\tS\tBF000123\t27-04-26");
+        let bytes = p.build_cancel_open_legacy(&storno_req("BF000123", None));
         assert_eq!(String::from_utf8_lossy(&bytes), "1\t0001\t1\tS\tBF000123");
     }
 
     #[test]
-    fn cancel_item_uses_negative_quantity() {
-        let bytes = DatecsDp25Provider::build_cancel_item(&item("Cafea", 2.0, 5.0, 0.19));
-        let s = String::from_utf8_lossy(&bytes);
-        // build_register_item uses fmt_amount which always uses .abs(); the
-        // sign is in the storno open frame, not the item line itself. Datecs
-        // firmware infers the negative based on the storno discriminator.
-        // Confirm parity with the positive register_item.
-        assert_eq!(s, "Cafea\t1\t5.00\t2.00\t0\t0.00\t0\tbuc\t");
+    fn storno_open_frame_matches_manual_cmd_43() {
+        // {OpCode}{OpPwd}{TillNmb}{Storno}{DocNum}{DateTime}{FMNumber}
+        // {Invoice}{ToInvoice}{Reason}[{NSale}], each followed by <SEP>.
+        let p = provider(false);
+        let ten = p.build_storno_open("1", "46", "14-10-26 18:05:09", "02123456", false);
+        assert_eq!(
+            String::from_utf8_lossy(&ten),
+            "1\t0001\t1\t1\t46\t14-10-26 18:05:09\t02123456\t\t\t\t"
+        );
+        let eleven = p.build_storno_open("0", "46", "14-10-26 18:05:09", "02123456", true);
+        assert_eq!(
+            String::from_utf8_lossy(&eleven),
+            "1\t0001\t1\t0\t46\t14-10-26 18:05:09\t02123456\t\t\t\t\t"
+        );
+        assert_eq!(CmdCodes::default().storno_open, 0x2B);
+    }
+
+    #[test]
+    fn storno_lines_are_positive_like_a_sale() {
+        // Inside a storno document the lines keep the sale shape; the
+        // document type makes them negative (manual: '-' is for VOID
+        // inside a receipt, not for storno).
+        let bytes = DatecsDp25Provider::build_register_item(&item("Cafea", 2.0, 5.0, 0.19));
+        assert_eq!(String::from_utf8_lossy(&bytes), "Cafea\t1\t5.00\t2.00\t0\t0.00\t0\tbuc\t");
+    }
+
+    #[test]
+    fn fiscal_text_is_cmd_36_with_sep() {
+        assert_eq!(CmdCodes::default().fiscal_text, 0x36);
+        let b = DatecsDp25Provider::build_fiscal_text("Retur client");
+        assert_eq!(b, b"Retur client\t");
+        let long = DatecsDp25Provider::build_fiscal_text(&"x".repeat(60));
+        let (s, _, _) = encoding_rs::WINDOWS_1250.decode(&long);
+        assert_eq!(s.trim_end_matches('\t').chars().count(), 30);
+    }
+
+    #[test]
+    fn storno_payments_never_exceed_the_storno_total() {
+        let items = vec![item("Cafea", 2.0, 5.0, 0.21)]; // 10.00
+        let pay = |m: PaymentMethod, a: f64| ReceiptPayment { method: m, amount: a };
+        // Tip on the original: 12.00 paid by card → 10.00.
+        let out = DatecsDp25Provider::storno_payments(&items, &[pay(PaymentMethod::Card, 12.0)]);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].amount - 10.0).abs() < 1e-9);
+        // Cash 8 + card 5 → cash 8 + card 2.
+        let out = DatecsDp25Provider::storno_payments(
+            &items,
+            &[pay(PaymentMethod::Cash, 8.0), pay(PaymentMethod::Card, 5.0)],
+        );
+        assert_eq!(out.len(), 2);
+        assert!((out[1].amount - 2.0).abs() < 1e-9);
+        // Cash 10 + card 3 → card dropped.
+        let out = DatecsDp25Provider::storno_payments(
+            &items,
+            &[pay(PaymentMethod::Cash, 10.0), pay(PaymentMethod::Card, 3.0)],
+        );
+        assert_eq!(out.len(), 1);
+        // No payment → one cash payment for the total.
+        let out = DatecsDp25Provider::storno_payments(&items, &[]);
+        assert!(matches!(out[0].method, PaymentMethod::Cash));
+        assert!((out[0].amount - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn periodic_report_is_0x5e_with_type_and_dashed_dates() {
+        let (cmd, payload) = provider(false).periodic_frame("011026", "151026").unwrap();
+        assert_eq!(cmd, 0x5E);
+        assert_eq!(payload, b"0\t01-10-26\t15-10-26\t");
+        // ISO accepted too; a reversed range is refused before the port.
+        let (_, iso) = provider(false).periodic_frame("2026-09-01", "2026-09-30").unwrap();
+        assert_eq!(iso, b"0\t01-09-26\t30-09-26\t");
+        assert!(provider(false).periodic_frame("151026", "011026").is_err());
+        // Legacy variant unchanged.
+        let (lcmd, lpayload) = provider(true).periodic_frame("011026", "151026").unwrap();
+        assert_eq!(lcmd, 0x4F);
+        assert_eq!(lpayload, b"011026\t151026");
     }
 
     #[test]
@@ -846,5 +1114,252 @@ mod tests {
     #[test]
     fn cancel_open_receipt_is_0x3c() {
         assert_eq!(CmdCodes::default().void_open_receipt, 0x3C);
+    }
+
+    // ---------------------------------------------------------------
+    // Whole command sequences against a scripted fake DP-25X.
+
+    use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    type Log = Arc<Mutex<Vec<(u16, String)>>>;
+    type Responder = Box<dyn FnMut(u16, &str) -> String + Send>;
+
+    /// Decodes each frame the driver writes (STX LEN SEQ CMD DATA POST BCC
+    /// ETX, 0x30 nibble offset), logs (cmd, data) and answers with
+    /// `respond(cmd, data)` + 0x04 + the 8 status bytes.
+    struct FakeRegister {
+        inbuf: Vec<u8>,
+        out: VecDeque<u8>,
+        log: Log,
+        status: [u8; 8],
+        respond: Responder,
+    }
+
+    impl Write for FakeRegister {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inbuf.extend_from_slice(buf);
+            if self.inbuf.last() == Some(&0x03) {
+                let frame = std::mem::take(&mut self.inbuf);
+                let seq = frame[5];
+                let cmd = frame[6..10]
+                    .iter()
+                    .fold(0u16, |acc, b| (acc << 4) | (b.wrapping_sub(0x30) & 0x0F) as u16);
+                let data = &frame[10..frame.len() - 6];
+                let (text, _, _) = encoding_rs::WINDOWS_1250.decode(data);
+                self.log.lock().unwrap().push((cmd, text.to_string()));
+                let fields = (self.respond)(cmd, &text);
+                let mut reply = vec![0x01, 0x30, 0x30, 0x30, 0x30, seq];
+                reply.extend_from_slice(&frame[6..10]);
+                reply.extend_from_slice(fields.as_bytes());
+                reply.push(0x04);
+                reply.extend_from_slice(&self.status);
+                reply.extend_from_slice(&[0x05, 0x30, 0x30, 0x30, 0x30, 0x03]);
+                self.out.extend(reply);
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for FakeRegister {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.out.pop_front() {
+                Some(b) => {
+                    buf[0] = b;
+                    Ok(1)
+                }
+                None => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "no reply")),
+            }
+        }
+    }
+
+    fn on_fake(
+        p: &DatecsDp25Provider,
+        status: [u8; 8],
+        respond: impl FnMut(u16, &str) -> String + Send + 'static,
+    ) -> Log {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let fake = FakeRegister {
+            inbuf: Vec::new(),
+            out: VecDeque::new(),
+            log: log.clone(),
+            status,
+            respond: Box::new(respond),
+        };
+        p.transport.lock().unwrap().attach_for_test(Box::new(fake));
+        log
+    }
+
+    fn cmds(log: &Log) -> Vec<u16> {
+        log.lock().unwrap().iter().map(|(c, _)| *c).collect()
+    }
+
+    fn data_of(log: &Log, cmd: u16) -> Vec<String> {
+        log.lock().unwrap().iter().filter(|(c, _)| *c == cmd).map(|(_, d)| d.clone()).collect()
+    }
+
+    const DEVICE_INFO: &str = "DP-25X,1.00RO 14Mar24 1200,ABCD,00000000,DT123456,02123456";
+
+    fn happy(cmd: u16, _data: &str) -> String {
+        match cmd {
+            0x5A => DEVICE_INFO.into(),
+            0x2B | 0x31 | 0x38 => "0\t47\t".into(),
+            0x36 | 0x35 => "0\t".into(),
+            _ => "-100999\t".into(),
+        }
+    }
+
+    #[test]
+    fn storno_sequence_open_2b_lines_text_payment_close() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, happy);
+        let r = p
+            .cancel_receipt(storno_req("000046", Some("2026-10-14T18:05:09")))
+            .expect("storno printed");
+        assert_eq!(cmds(&log), vec![0x5A, 0x2B, 0x31, 0x36, 0x35, 0x38]);
+        assert_eq!(data_of(&log, 0x5A), vec!["1".to_string()]);
+        assert_eq!(
+            data_of(&log, 0x2B),
+            vec!["1\t0001\t1\t1\t46\t14-10-26 18:05:09\t02123456\t\t\t\t".to_string()]
+        );
+        assert_eq!(data_of(&log, 0x31), vec!["Cafea\t1\t5.00\t2.00\t0\t0.00\t0\tbuc\t".to_string()]);
+        assert_eq!(data_of(&log, 0x36), vec!["Retur client\t".to_string()]);
+        assert_eq!(data_of(&log, 0x35), vec!["0\t10.00\t".to_string()]);
+        assert_eq!(r.fiscal_number.as_deref(), Some("47"));
+        // Never the old 0x32 (= "active VAT rates" on the DP-25X).
+        assert!(!cmds(&log).contains(&0x32));
+    }
+
+    #[test]
+    fn storno_uses_server_fm_number_and_reason_type() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, happy);
+        let mut req = storno_req("46", Some("2026-10-14 09:00:00"));
+        req.original_fm_number = Some("02999999".into());
+        req.storno_type = Some("operator_error".into());
+        req.reason = String::new();
+        p.cancel_receipt(req).expect("storno printed");
+        // No 0x5A read, no text line without a reason.
+        assert_eq!(cmds(&log), vec![0x2B, 0x31, 0x35, 0x38]);
+        assert_eq!(
+            data_of(&log, 0x2B),
+            vec!["1\t0001\t1\t0\t46\t14-10-26 09:00:00\t02999999\t\t\t\t".to_string()]
+        );
+    }
+
+    #[test]
+    fn storno_retries_open_with_nsale_field_only_on_syntax_error() {
+        let p = provider(false);
+        let mut opens = 0;
+        let log = on_fake(&p, OWNER_STATUS, move |cmd, data| {
+            if cmd == 0x2B {
+                opens += 1;
+                return if opens == 1 { "-112001\t".into() } else { "0\t47\t".into() };
+            }
+            happy(cmd, data)
+        });
+        p.cancel_receipt(storno_req("46", Some("2026-10-14T18:05:09"))).expect("second form accepted");
+        assert_eq!(cmds(&log), vec![0x5A, 0x2B, 0x2B, 0x31, 0x36, 0x35, 0x38]);
+        let forms = data_of(&log, 0x2B);
+        assert!(forms[0].ends_with("02123456\t\t\t\t"));
+        assert!(forms[1].ends_with("02123456\t\t\t\t\t"));
+    }
+
+    #[test]
+    fn storno_open_refused_sends_nothing_else() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, |cmd, data| {
+            if cmd == 0x2B { "-111024\t".into() } else { happy(cmd, data) }
+        });
+        let e = p.cancel_receipt(storno_req("46", Some("2026-10-14T18:05:09"))).unwrap_err();
+        assert!(matches!(e, FiscalError::Device { code: -111024, .. }));
+        assert!(e.to_string().starts_with("Casa a refuzat bonul de stornare: Este necesar raportul Z"));
+        // Not a syntax error → no second form, no lines, no 0x3C.
+        assert_eq!(cmds(&log), vec![0x5A, 0x2B]);
+    }
+
+    #[test]
+    fn storno_line_refused_voids_the_open_document() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, |cmd, data| match cmd {
+            0x31 => "-100999\t".into(),
+            0x3C => "0\t".into(),
+            _ => happy(cmd, data),
+        });
+        let e = p.cancel_receipt(storno_req("46", Some("2026-10-14T18:05:09"))).unwrap_err();
+        assert!(matches!(e, FiscalError::Device { code: -100999, .. }));
+        assert_eq!(cmds(&log), vec![0x5A, 0x2B, 0x31, 0x3C]);
+    }
+
+    #[test]
+    fn storno_bad_request_never_touches_the_port() {
+        // No fake attached: a COM access would fail with "open COMx".
+        let p = provider(false);
+        for req in [
+            storno_req("46", None),
+            storno_req("TEST-1760000000", Some("2026-10-14")),
+            storno_req("46", Some("@unix:1760000000")),
+        ] {
+            let e = p.cancel_receipt(req).unwrap_err();
+            assert!(matches!(e, FiscalError::InvalidCommand { .. }), "{e}");
+        }
+        let mut bad_type = storno_req("46", Some("2026-10-14"));
+        bad_type.storno_type = Some("nimic".into());
+        assert!(matches!(p.cancel_receipt(bad_type).unwrap_err(), FiscalError::InvalidCommand { .. }));
+    }
+
+    #[test]
+    fn status_reads_the_x_status_bytes() {
+        let p = provider(false);
+        let mut st = OWNER_STATUS;
+        st[2] |= 0x01; // end of paper
+        let _log = on_fake(&p, st, |_, _| "0\t".into());
+        let s = p.get_status().unwrap();
+        assert!(!s.ready && !s.paper_ok);
+        assert_eq!(s.error_code.as_deref(), Some("X_PAPER_OUT"));
+
+        let p = provider(false);
+        let mut st = OWNER_STATUS;
+        st[0] |= 0x40; // cover open
+        let _log = on_fake(&p, st, |_, _| "0\t".into());
+        let s = p.get_status().unwrap();
+        assert!(s.error_message.unwrap().starts_with("Capacul casei"));
+
+        let p = provider(false);
+        let _log = on_fake(&p, OWNER_STATUS, |_, _| "0\t".into());
+        let s = p.get_status().unwrap();
+        assert!(s.ready && s.paper_ok && s.error_message.is_none());
+    }
+
+    #[test]
+    fn periodic_report_sequence() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, |_, _| "0\t".into());
+        p.print_periodic_memory("011026", "151026").expect("printed");
+        assert_eq!(cmds(&log), vec![0x5E]);
+        assert_eq!(data_of(&log, 0x5E), vec!["0\t01-10-26\t15-10-26\t".to_string()]);
+    }
+
+    #[test]
+    fn receipt_sequence_unchanged() {
+        let p = provider(false);
+        let log = on_fake(&p, OWNER_STATUS, |cmd, _| match cmd {
+            0x30 | 0x31 | 0x38 => "0\t48\t".into(),
+            _ => "0\t".into(),
+        });
+        let r = p
+            .print_receipt(ReceiptRequest {
+                mutation_id: "m".into(), order_local_id: "o".into(), fiscal_attempt_id: "a".into(),
+                items: vec![item("Cafea", 1.0, 5.0, 0.21)], payments: vec![],
+                currency: "RON".into(), customer_cif: None, customer_name: None, footer_note: None,
+            })
+            .unwrap();
+        assert_eq!(cmds(&log), vec![0x30, 0x31, 0x35, 0x38]);
+        assert_eq!(data_of(&log, 0x35), vec!["0\t5.00\t".to_string()]);
+        assert_eq!(r.fiscal_number.as_deref(), Some("48"));
     }
 }

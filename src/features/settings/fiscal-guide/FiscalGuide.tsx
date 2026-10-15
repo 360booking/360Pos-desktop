@@ -51,7 +51,12 @@ import {
   linkSummary,
   orderPortsForSearch,
   portLabel,
+  isoToDdmmyy,
+  localIsoDate,
+  periodicRangeProblem,
+  previousMonthRange,
   printerAnswer,
+  printerNotice,
   probeToForm,
   summariseSearch,
   tillSummary,
@@ -137,6 +142,8 @@ export function FiscalGuide() {
   // ------------------------------------------------------------ reports + help
   const [zStep, setZStep] = useState<0 | 1 | 2>(0);
   const [zrep, setZrep] = useState<Outcome>(IDLE);
+  const [perRange, setPerRange] = useState(() => previousMonthRange(new Date()));
+  const [perRep, setPerRep] = useState<Outcome>(IDLE);
   const [diag, setDiag] = useState<Outcome>(IDLE);
   const [diagText, setDiagText] = useState<string | null>(null);
 
@@ -261,6 +268,7 @@ export function FiscalGuide() {
   const revoked = !connected && (Boolean(bridge?.revoked) || Boolean(health?.agent.revoked));
   const connError = enrolled && !connected ? (bridge?.last_error ?? health?.agent.lastError ?? null) : null;
   const answer = printerAnswer(health?.printer ?? null, localCheck);
+  const notice = printerNotice(health?.printer ?? null);
   const tillConfigured = configSaved && isRealProvider(cfg?.provider) && Boolean(cfg?.serial_port);
   const { steps, current } = deriveSteps({
     configSaved,
@@ -457,6 +465,22 @@ export function FiscalGuide() {
     }
   }
 
+  async function printPeriodic() {
+    const problem = periodicRangeProblem(perRange.from, perRange.to, localIsoDate(new Date()));
+    if (problem) {
+      setPerRep({ state: 'err', e: { title: problem, checks: [] }, raw: '' });
+      return;
+    }
+    setPerRep({ state: 'busy' });
+    try {
+      const r = await shellApi.printPeriodicReport(isoToDdmmyy(perRange.from)!, isoToDdmmyy(perRange.to)!);
+      if (r.status !== 'printed') throw new Error(r.error_message || `Raport periodic: ${r.status}`);
+      setPerRep({ state: 'ok', text: 'Raportul periodic (memoria fiscală) a ieșit ✓' });
+    } catch (err) {
+      setPerRep({ state: 'err', e: explainFiscalError(errText(err)), raw: errText(err) });
+    }
+  }
+
   async function copyDiagnostics() {
     setDiag({ state: 'busy' });
     let text: string;
@@ -516,6 +540,7 @@ export function FiscalGuide() {
               </span>
             ) : null}
           </div>
+          {notice ? <div className="basis-full text-xs text-amber-300">{notice}</div> : null}
           <div className="flex items-center gap-2 text-sm">
             <Dot tone={linkS.tone} />
             <span className="text-slate-300">Legătura cu restaurantul:</span>
@@ -797,7 +822,7 @@ export function FiscalGuide() {
         <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           <h3 className="text-base font-semibold text-slate-100">Rapoarte fiscale</h3>
           <p className="text-sm text-slate-400">
-            Rapoartele X și Z se dau doar de aici, de pe calculatorul cu casa de marcat.
+            Rapoartele X, Z și raportul periodic se dau doar de aici, de pe calculatorul cu casa de marcat.
           </p>
           {!tillConfigured && <p className="text-sm text-amber-300">Mai întâi fă pasul 1, ca să știu pe ce casă tipăresc.</p>}
           <div className="flex flex-wrap gap-2">
@@ -842,6 +867,30 @@ export function FiscalGuide() {
           )}
           <Result o={xrep} />
           <Result o={zrep} />
+          <div className="flex flex-wrap items-end gap-2 border-t border-slate-800 pt-3 text-sm">
+            <label className="flex flex-col gap-1 text-slate-400">
+              De la
+              <input
+                type="date"
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-100"
+                value={perRange.from}
+                onChange={(e) => setPerRange((r) => ({ ...r, from: e.target.value }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-slate-400">
+              Până la
+              <input
+                type="date"
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-100"
+                value={perRange.to}
+                onChange={(e) => setPerRange((r) => ({ ...r, to: e.target.value }))}
+              />
+            </label>
+            <button className={btnSecondary} onClick={() => void printPeriodic()} disabled={perRep.state === 'busy' || !tillConfigured}>
+              {perRep.state === 'busy' ? <Spinner /> : <Printer className="h-4 w-4" />} Raport periodic (memoria fiscală)
+            </button>
+          </div>
+          <Result o={perRep} />
         </section>
       )}
 

@@ -62,7 +62,7 @@ pub struct FullStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StatusFlag {
-    pub byte: u8,         // 0..=5
+    pub byte: u8,         // 0..=5 (legacy), 0..=7 (X dialect)
     pub bit: u8,          // 0..=7
     pub code: &'static str,
     pub severity: Severity,
@@ -172,6 +172,218 @@ pub fn decode_full(status: &[u8; 6]) -> FullStatus {
         error_message,
         raw: Some(raw),
         flags,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DP-25X / FP-700X ("X dialect") — 8 status bytes after the 0x04 separator
+// inside every answer's DATA (the legacy 6-byte field above does not exist
+// there; decode_full would always see zeros = "ready").
+//
+// Bit table — Datecs FMP-350X/FMP-55X/FP-700X/DP-25X Programmer's Manual
+// v2.02, "Status bits" (bit 7 of every byte is always 1; '#' bits are ORed
+// into 0.5 "general error"):
+//   S0: 6 cover open · 5 general error · 4# printing mechanism failure ·
+//       2 clock not synchronized · 1# invalid command code · 0# syntax error
+//   S1: 1# command not permitted · 0# overflow during execution
+//   S2: 5 non-fiscal receipt open · 4 EJ nearly full · 3 fiscal receipt
+//       open · 2 EJ full · 1 near paper end · 0# end of paper
+//   S4: 6 FM not found/damaged · 5 OR of '*' · 4* FM full · 3 room for
+//       less than 60 reports · 2 serial+FM number set · 1 tax number set ·
+//       0* FM access error
+//   S5: 4 VAT set · 3 fiscalised · 1 FM formatted
+//   S3, S6, S7: unused.
+// S0.0/0.1/1.0/1.1 describe the LAST command, not the register — kept as
+// info only. The owner's register sends S1 = 0x84 (bit 2, documented as
+// "always 0"): not interpreted, it stays visible in `raw`.
+
+/// Decode the 8 X-dialect status bytes. Fewer than 6 bytes, or bytes
+/// without the always-1 bit 7, are not a status field: returned as "no
+/// information" (ready, no flags) with the raw dump, never as an error.
+pub fn decode_x(status: &[u8]) -> FullStatus {
+    let raw = status
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let valid = status.len() >= 6 && status.iter().take(6).all(|b| b & 0x80 != 0);
+    let mut flags: Vec<StatusFlag> = Vec::new();
+    if valid {
+        let s = |byte: usize, idx: u8| status.get(byte).map(|b| bit(*b, idx)).unwrap_or(false);
+        let mut push = |byte: u8, idx: u8, code: &'static str, sev: Severity, msg: &'static str| {
+            if s(byte as usize, idx) {
+                flags.push(flag(byte, idx, code, sev, msg));
+            }
+        };
+        use Severity::{Blocking, Info, Warning};
+        // Blocking — printing cannot work until someone fixes it.
+        push(0, 6, "X_COVER_OPEN", Blocking, "Capacul casei este deschis — închide-l, apoi încearcă din nou.");
+        push(2, 0, "X_PAPER_OUT", Blocking, "Casa nu mai are hârtie — pune o rolă nouă și închide capacul.");
+        push(0, 4, "X_PRINTER_FAULT", Blocking, "Mecanismul de tipărire al casei are o problemă — verifică rola și capacul, apoi oprește și pornește casa.");
+        push(2, 2, "X_EJ_FULL", Blocking, "Jurnalul electronic al casei este plin — sună service-ul casei.");
+        push(4, 4, "X_FM_FULL", Blocking, "Memoria fiscală a casei este plină — sună service-ul casei.");
+        push(4, 6, "X_FM_MISSING", Blocking, "Memoria fiscală a casei lipsește sau e defectă — sună service-ul casei.");
+        push(4, 0, "X_FM_ACCESS", Blocking, "Memoria fiscală a casei nu poate fi citită — sună service-ul casei.");
+        // A document left open: not an error, but a new bon cannot start.
+        push(2, 3, "X_FISCAL_RECEIPT_OPEN", Info, "Pe casă a rămas deschis un bon fiscal — termină-l sau anulează-l din meniul casei.");
+        push(2, 5, "X_NONFISCAL_RECEIPT_OPEN", Info, "Pe casă a rămas deschis un bon nefiscal — închide-l din meniul casei.");
+        // Warnings — printing still works.
+        push(2, 1, "X_PAPER_NEAR_END", Warning, "Hârtia din casă e pe terminate — pregătește o rolă nouă.");
+        push(2, 4, "X_EJ_NEAR_FULL", Warning, "Jurnalul electronic al casei e aproape plin — anunță service-ul casei.");
+        push(4, 3, "X_FM_NEAR_FULL", Warning, "Memoria fiscală mai are loc pentru mai puțin de 60 de rapoarte Z — anunță service-ul casei.");
+        push(0, 2, "X_CLOCK", Warning, "Ceasul casei nu este sincronizat — verifică data și ora pe casă.");
+        // Last-command bits: shown in diagnostics only.
+        push(0, 0, "X_LAST_SYNTAX", Info, "Ultima comandă a avut o eroare de sintaxă.");
+        push(0, 1, "X_LAST_INVALID", Info, "Ultima comandă nu e cunoscută de casă.");
+        push(1, 0, "X_LAST_OVERFLOW", Info, "Ultima comandă a depășit o limită.");
+        push(1, 1, "X_LAST_NOT_PERMITTED", Info, "Ultima comandă nu era permisă în starea casei.");
+        if !s(5, 3) {
+            flags.push(flag(5, 3, "X_NOT_FISCALISED", Warning, "Casa nu este fiscalizată — bonurile nu sunt fiscale. Cheamă service-ul casei."));
+        }
+    }
+
+    let first = |sev: Severity| flags.iter().find(|f| f.severity == sev);
+    let open = flags
+        .iter()
+        .find(|f| f.code == "X_FISCAL_RECEIPT_OPEN" || f.code == "X_NONFISCAL_RECEIPT_OPEN");
+    let paper_ok = !flags.iter().any(|f| f.code == "X_PAPER_OUT");
+
+    let (ready, busy, shown) = if let Some(b) = first(Severity::Blocking) {
+        (false, false, Some(b))
+    } else if let Some(o) = open {
+        (false, true, Some(o))
+    } else {
+        (true, false, first(Severity::Warning))
+    };
+
+    FullStatus {
+        online: true,
+        paper_ok,
+        ready,
+        busy,
+        error_code: shown.map(|f| f.code.to_string()),
+        error_message: shown.map(|f| f.message_ro.to_string()),
+        raw: Some(raw),
+        flags,
+    }
+}
+
+/// `FiscalStatus` from the X-dialect status bytes.
+pub fn decode_x_minimal(status: &[u8]) -> FiscalStatus {
+    let full = decode_x(status);
+    FiscalStatus {
+        online: full.online,
+        paper_ok: full.paper_ok,
+        ready: full.ready,
+        busy: full.busy,
+        error_code: full.error_code,
+        error_message: full.error_message,
+        raw: full.raw,
+    }
+}
+
+#[cfg(test)]
+mod x_tests {
+    use super::*;
+
+    /// The owner's DP-25X, 2026-10-14 (fiscalised, no problem).
+    const OWNER: [u8; 8] = [0x80, 0x84, 0x80, 0x80, 0x86, 0x9a, 0x80, 0x80];
+
+    fn with(byte: usize, mask: u8) -> [u8; 8] {
+        let mut s = OWNER;
+        s[byte] |= mask;
+        s
+    }
+
+    #[test]
+    fn owner_register_is_ready_without_message() {
+        let s = decode_x(&OWNER);
+        assert!(s.online && s.ready && s.paper_ok && !s.busy);
+        assert!(s.error_code.is_none() && s.error_message.is_none());
+        assert!(s.flags.is_empty());
+        assert_eq!(s.raw.as_deref(), Some("80 84 80 80 86 9A 80 80"));
+    }
+
+    #[test]
+    fn paper_out_blocks_and_clears_paper_ok() {
+        let s = decode_x(&with(2, 0x01));
+        assert!(!s.ready && !s.paper_ok);
+        assert_eq!(s.error_code.as_deref(), Some("X_PAPER_OUT"));
+        assert!(s.error_message.unwrap().contains("hârtie"));
+    }
+
+    #[test]
+    fn paper_near_end_is_a_warning_still_ready() {
+        let s = decode_x(&with(2, 0x02));
+        assert!(s.ready && s.paper_ok);
+        assert_eq!(s.error_code.as_deref(), Some("X_PAPER_NEAR_END"));
+        assert!(s.error_message.unwrap().contains("pe terminate"));
+    }
+
+    #[test]
+    fn cover_open_blocks() {
+        let s = decode_x(&with(0, 0x40));
+        assert!(!s.ready);
+        assert!(s.paper_ok);
+        assert_eq!(s.error_code.as_deref(), Some("X_COVER_OPEN"));
+        assert!(s.error_message.unwrap().starts_with("Capacul casei este deschis"));
+    }
+
+    #[test]
+    fn printer_fault_blocks() {
+        // 0.4 failure + 0.5 general error (OR of the '#' bits).
+        let s = decode_x(&with(0, 0x30));
+        assert!(!s.ready);
+        assert_eq!(s.error_code.as_deref(), Some("X_PRINTER_FAULT"));
+    }
+
+    #[test]
+    fn fiscal_receipt_open_is_busy_with_message() {
+        let s = decode_x(&with(2, 0x08));
+        assert!(!s.ready && s.busy);
+        assert_eq!(s.error_code.as_deref(), Some("X_FISCAL_RECEIPT_OPEN"));
+        assert!(s.error_message.unwrap().contains("bon fiscal"));
+    }
+
+    #[test]
+    fn blocking_wins_over_open_receipt_and_warnings() {
+        let mut st = with(2, 0x08 | 0x02); // receipt open + near paper end
+        st[0] |= 0x40; // cover open
+        let s = decode_x(&st);
+        assert_eq!(s.error_code.as_deref(), Some("X_COVER_OPEN"));
+        assert_eq!(s.flags.len(), 3);
+    }
+
+    #[test]
+    fn fiscal_memory_problems_block() {
+        assert_eq!(decode_x(&with(4, 0x10)).error_code.as_deref(), Some("X_FM_FULL"));
+        assert_eq!(decode_x(&with(4, 0x40)).error_code.as_deref(), Some("X_FM_MISSING"));
+        assert_eq!(decode_x(&with(2, 0x04)).error_code.as_deref(), Some("X_EJ_FULL"));
+    }
+
+    #[test]
+    fn last_command_bits_do_not_block() {
+        let s = decode_x(&with(0, 0x01));
+        assert!(s.ready);
+        assert!(s.error_code.is_none());
+        assert!(s.flags.iter().any(|f| f.code == "X_LAST_SYNTAX"));
+    }
+
+    #[test]
+    fn not_fiscalised_is_a_warning() {
+        let mut st = OWNER;
+        st[5] = 0x92; // fiscalised bit 3 cleared
+        let s = decode_x(&st);
+        assert!(s.ready);
+        assert_eq!(s.error_code.as_deref(), Some("X_NOT_FISCALISED"));
+    }
+
+    #[test]
+    fn missing_or_garbage_status_is_no_information() {
+        for st in [&[][..], &[0x80, 0x80][..], &[0, 0, 0, 0, 0, 0, 0, 0][..]] {
+            let s = decode_x(st);
+            assert!(s.ready && s.flags.is_empty() && s.error_code.is_none());
+        }
     }
 }
 

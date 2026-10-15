@@ -147,6 +147,8 @@ export class RustFiscalAdapter implements FiscalDeviceAdapter {
         fiscal_attempt_id: req.fiscalAttemptId,
         original_fiscal_number: req.originalFiscalNumber,
         original_fiscal_date: req.originalFiscalDate ?? null,
+        original_fm_number: req.originalFmNumber ?? null,
+        storno_type: req.stornoType ?? null,
         items: req.lines.map((l) => ({
           name: l.name,
           quantity: l.quantity,
@@ -248,7 +250,7 @@ export class RustFiscalAdapter implements FiscalDeviceAdapter {
     }
   }
 
-  /** Print periodic memory between two dates (DDMMYY format expected). */
+  /** Fiscal memory report between two dates (DDMMYY; DP-25X: cmd 0x5E, short). */
   async printPeriodicMemory(
     dateFrom: string,
     dateTo: string,
