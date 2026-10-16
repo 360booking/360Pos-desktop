@@ -71,7 +71,8 @@ export function restaurantOrderToOrder(remote: RestaurantOrder, deviceId: string
     payments: [],
     discountCents: cents(remote.discountTotal),
     discountNote: null,
-    tipCents: 0,
+    // Bacșișul vine de la server (POST /tip), ca în POS-ul web.
+    tipCents: cents(remote.tipTotal),
     subtotalCents: cents(remote.subtotal),
     vatCents: cents(remote.taxTotal),
     totalCents: cents(remote.total),

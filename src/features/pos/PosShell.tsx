@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock } from 'lucide-react';
+import { Plus, Minus, Trash2, Users, Utensils, Receipt, Send, CreditCard, Banknote, Lock, Gift, Split } from 'lucide-react';
 import { StatusBar } from './StatusBar';
 import RestaurantAlertBanner from './RestaurantAlertBanner';
 import { KitchenQueueStrip } from './KitchenQueueStrip';
@@ -7,6 +7,9 @@ import { ClaimOrderModal } from './ClaimOrderModal';
 import { PaymentModal } from './PaymentModal';
 import { RecoveryTray } from './RecoveryTray';
 import { NewOrderSheet } from './NewOrderSheet';
+import { TipDialog } from './TipDialog';
+import { SplitBillDialog } from './SplitBillDialog';
+import { canSetTip } from './tipSplit';
 import { DiagnosticsModal } from './DiagnosticsModal';
 import { SettingsScreen } from '@/features/settings/SettingsScreen';
 import { useRecovery } from '@/store/recovery';
@@ -106,6 +109,8 @@ export function PosShell() {
   const [newOrderOpen, setNewOrderOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
 
   // Hydrate the recovery list once on mount so the StatusBar pill
   // reflects pre-existing rows from a prior session.
@@ -226,6 +231,8 @@ export function PosShell() {
           order={actions.order}
           totals={totals}
           onCash={() => setPaymentOpen(true)}
+          onTip={() => setTipOpen(true)}
+          onSplit={() => setSplitOpen(true)}
           onClear={() => actions.clear()}
           onIncrement={(id) =>
             void actions.incrementQuantity(id).catch((err: unknown) =>
@@ -279,6 +286,43 @@ export function PosShell() {
           onCardOutcome={(amt, status, terminal) =>
             actions.recordCardOutcome(amt, status, terminal)
           }
+        />
+      )}
+      {tipOpen && actions.order && (
+        <TipDialog
+          currentCents={actions.order.tipCents}
+          onClose={() => setTipOpen(false)}
+          onSave={async (amountCents) => {
+            try {
+              await actions.setTip(amountCents);
+            } catch (err) {
+              handleMutationError(err, 'Nu am putut seta bacșișul');
+              throw err;
+            }
+          }}
+        />
+      )}
+      {splitOpen && actions.order?.tableId && (
+        <SplitBillDialog
+          tableId={actions.order.tableId}
+          activeOrderId={actions.order.serverId}
+          onError={handleMutationError}
+          onClose={() => {
+            setSplitOpen(false);
+            // Refresh the cart: products may have left this note (an
+            // emptied note is cancelled by the server → the cart clears).
+            const id = actions.order?.serverId;
+            if (id) withMutationErrorHandler(actions.resumeOrder(id));
+          }}
+          onPay={(orderId) => {
+            setSplitOpen(false);
+            void actions
+              .resumeOrder(orderId)
+              .then((o) => {
+                if (o) setPaymentOpen(true);
+              })
+              .catch((err: unknown) => handleMutationError(err));
+          }}
         />
       )}
       {recoveryOpen && <RecoveryTray onClose={() => setRecoveryOpen(false)} />}
@@ -813,6 +857,8 @@ interface CartPaneProps {
   order: Order | null;
   totals: OrderTotals;
   onCash: () => void;
+  onTip: () => void;
+  onSplit: () => void;
   onClear: () => void;
   onIncrement: (itemId: string) => void;
   onDecrement: (itemId: string) => void;
@@ -825,6 +871,8 @@ function CartPane({
   order,
   totals,
   onCash,
+  onTip,
+  onSplit,
   onClear,
   onIncrement,
   onDecrement,
@@ -843,6 +891,9 @@ function CartPane({
   const unsentCount = activeItems.filter((it) => !it.sentAt).length;
   const sentCount = activeItems.length - unsentCount;
   const canPay = order != null && totals.totalCents > 0 && order.state !== 'paid' && order.state !== 'cancelled';
+  // Bacșiș / Împarte nota — ca în POS-ul web; împărțirea e pe notele mesei.
+  const canTip = canSetTip(order);
+  const canSplit = canTip && order?.tableId != null;
   // Three Trimite states matching POSPage.tsx:
   //   draft / open + unsent items     → violet "Trimite"
   //   sent + new items added after    → amber "Trimite update (N)"
@@ -920,6 +971,26 @@ function CartPane({
           <Row label="Plătit" value={formatMoney(totals.paidCents)} accent="emerald" />
         )}
         <div className="grid grid-cols-2 gap-2 pt-2">
+          <button
+            type="button"
+            disabled={!canTip}
+            onClick={onTip}
+            className="touch-target rounded-xl py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-amber-500/15 text-amber-200 border border-amber-400/30 hover:bg-amber-500/25 disabled:opacity-40"
+            title="Bacșișul se adaugă la total, nu pe bonul fiscal"
+          >
+            <Gift className="h-4 w-4" /> Bacșiș
+          </button>
+          <button
+            type="button"
+            disabled={!canSplit}
+            onClick={onSplit}
+            className="touch-target rounded-xl py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-2 bg-white/[0.06] text-slate-100 border border-white/15 hover:bg-white/[0.1] disabled:opacity-40"
+            title={order?.tableId ? 'Împarte produsele mesei în mai multe note' : 'Doar pentru comenzile de la masă'}
+          >
+            <Split className="h-4 w-4" /> Împarte nota
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
           <SendButton kind={sendKind} count={unsentCount} onClick={onSendToKitchen} />
           <button
             type="button"

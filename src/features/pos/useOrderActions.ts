@@ -393,6 +393,26 @@ export function useOrderActions() {
     [order, clear],
   );
 
+  /** Bacșiș (POST /orders/{id}/tip, ca POS-ul web) — online, ca restul
+   *  modificărilor de notă. 0 scoate bacșișul. */
+  const setTip = useCallback(
+    async (amountCents: number) => {
+      if (!order || !order.serverId) throw new OfflineMutationError('setTip');
+      if (!isReachable()) throw new OfflineMutationError('setTip');
+      const ctx = buildCtx();
+      try {
+        const updated = await restaurantOrdersApi.setTip(order.serverId, Math.max(0, amountCents) / 100);
+        assertOrderUsable(updated, order.serverId);
+        setOrder(restaurantOrderToOrder(updated, ctx.deviceId));
+        logger.info('pos.order', 'tip set via REST', { orderId: order.serverId, amountCents });
+      } catch (err) {
+        logger.error('pos.order', 'setTip REST failed', { err: String(err) });
+        classifyMutationFailure(err, 'setTip', order.serverId);
+      }
+    },
+    [order, setOrder, assertOrderUsable],
+  );
+
   // ── Payment helpers (cash offline / card) — refactored elsewhere ──
 
   const payCash = useCallback(async () => {
@@ -437,6 +457,7 @@ export function useOrderActions() {
         serverOrderId: order.serverId,
         restaurantId: restaurant.id,
         amountCents,
+        tipCents: order.tipCents,
       });
       if (outcome.kind === 'online') {
         setOrder(restaurantOrderToOrder(outcome.order, ctx.deviceId));
@@ -495,6 +516,7 @@ export function useOrderActions() {
     removeItem,
     sendOrderToKitchen,
     cancelCurrentOrder,
+    setTip,
     clear,
   };
 }

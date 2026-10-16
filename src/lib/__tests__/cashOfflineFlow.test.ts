@@ -56,6 +56,19 @@ describe('online branch', () => {
 });
 
 describe('offline branch — fiscal device gate', () => {
+  it('blocks offline cash on a note with a tip (tip is never on the receipt)', async () => {
+    flipOffline();
+    const printReceipt = vi.fn();
+    vi.spyOn(adapters, 'getFiscal').mockReturnValue({
+      status: vi.fn().mockResolvedValue({ online: true, ready: true, paperOk: true }),
+      printReceipt,
+    } as never);
+    await expect(
+      runCashFlow({ serverOrderId: 'ord-tip', restaurantId: 'r-1', amountCents: 5000, tipCents: 500 }),
+    ).rejects.toMatchObject({ name: 'CashFlowError', code: 'OFFLINE_HAS_TIP' });
+    expect(printReceipt).not.toHaveBeenCalled();
+  });
+
   it('blocks cash when DP-25X reports not ready', async () => {
     flipOffline();
     vi.spyOn(adapters, 'getFiscal').mockReturnValue({

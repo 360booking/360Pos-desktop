@@ -42,7 +42,8 @@ export class CashFlowError extends Error {
     | 'OFFLINE_NO_FISCAL_DEVICE'
     | 'FISCAL_PRINT_FAILED'
     | 'AMOUNT_INVALID'
-    | 'NO_RESTAURANT_CTX';
+    | 'NO_RESTAURANT_CTX'
+    | 'OFFLINE_HAS_TIP';
   constructor(
     code: CashFlowError['code'],
     message: string,
@@ -66,6 +67,10 @@ export interface CashFlowInput {
   operatorCode?: string;
   operatorPassword?: string;
   customerCif?: string;
+  /** Bacșișul notei (în `amountCents`). Bacșișul nu e pe bonul fiscal, deci
+   *  o notă cu bacșiș se închide doar online — aceeași regulă ca la casa
+   *  offline a POS-ului web (src-tauri/src/offline.rs). */
+  tipCents?: number;
 }
 
 const DEFAULT_OPERATOR = { code: '1', password: '0000' };
@@ -187,6 +192,12 @@ export async function runCashFlow(input: CashFlowInput): Promise<CashFlowOutcome
   }
 
   // ── Offline path ────────────────────────────────────────────────────
+  if ((input.tipCents ?? 0) > 0) {
+    throw new CashFlowError(
+      'OFFLINE_HAS_TIP',
+      'Nota are bacșiș — se închide doar online (bacșișul nu se pune pe bon).',
+    );
+  }
   const fiscal = getFiscal();
   if (!(await fiscalDeviceAvailable(fiscal))) {
     throw new CashFlowError(

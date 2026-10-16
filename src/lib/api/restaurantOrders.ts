@@ -46,6 +46,8 @@ export interface OrderItem {
   kitchenNotes: string | null;
   status: string;
   kitchenTicketId: string | null;
+  /** Locul de la masă (L1, L2…), pus din POS-ul web; null = fără loc. */
+  seatNo?: number | null;
 }
 
 export interface OrderPayment {
@@ -84,6 +86,9 @@ export interface RestaurantOrder {
   };
   subtotal: number;
   discountTotal: number;
+  /** Bacșișul notei — inclus în `total`, dar nu e pe bonul fiscal (îl
+   *  scoate serverul, ca în POS-ul web). */
+  tipTotal?: number;
   taxTotal: number;
   total: number;
   currency: string;
@@ -343,6 +348,49 @@ export const restaurantOrdersApi = {
           // operator retried, double-printing receipts.
           timeout: 60_000,
         },
+      );
+      return res.data;
+    } catch (err) {
+      throw wrap(err);
+    }
+  },
+
+  /** Bacșiș (aceeași cerere ca POS-ul web): suma în lei, 0 = fără bacșiș. */
+  setTip: async (orderId: string, amount: number): Promise<RestaurantOrder> => {
+    try {
+      const res = await getApiClient().post<RestaurantOrder>(
+        `/api/restaurant/orders/${orderId}/tip`,
+        { amount },
+      );
+      return res.data;
+    } catch (err) {
+      throw wrap(err);
+    }
+  },
+
+  /** „Împarte nota”: mută produse în altă notă a mesei (`toOrderId`) sau
+   *  într-o notă nouă (`newCheck`). Întoarce ambele note. */
+  moveItems: async (
+    orderId: string,
+    items: { itemId: string; quantity: number }[],
+    target: { toOrderId?: string; newCheck?: boolean },
+  ): Promise<{ from: RestaurantOrder; to: RestaurantOrder }> => {
+    try {
+      const res = await getApiClient().post<{ from: RestaurantOrder; to: RestaurantOrder }>(
+        `/api/restaurant/orders/${orderId}/items/move`,
+        { items, ...target },
+      );
+      return res.data;
+    } catch (err) {
+      throw wrap(err);
+    }
+  },
+
+  /** „Împarte pe locuri”: câte o notă pe fiecare loc, la aceeași masă. */
+  splitBySeats: async (orderId: string): Promise<{ orders: RestaurantOrder[] }> => {
+    try {
+      const res = await getApiClient().post<{ orders: RestaurantOrder[] }>(
+        `/api/restaurant/orders/${orderId}/split-seats`,
       );
       return res.data;
     } catch (err) {
