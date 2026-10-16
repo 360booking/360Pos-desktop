@@ -168,6 +168,10 @@ export const shellApi = {
   /** „Reîncearcă legarea”: the POS window opens Setări → Casa de marcat,
    *  which links the app again with a fresh code. */
   openFiscalLinkPage: () => invoke<void>('shell_open_fiscal_link_page'),
+  /** „Înapoi la POS” / „Înapoi în admin” in the window „Casa de marcat”:
+   *  the main window shows the POS / the admin (the web app asks for the
+   *  administrator password first) and the fiscal window closes. */
+  fiscalBack: (target: 'pos' | 'admin') => invoke<void>('shell_fiscal_back', { target }),
   printXReport: () =>
     invoke<{ status: string; fiscal_number: string | null; error_message: string | null }>('fiscal_print_x_report'),
   /** Z closes the fiscal day: a single-use token from `requestZConfirm`

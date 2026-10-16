@@ -68,7 +68,9 @@ export function StationSettings({
       setCfg(s.config);
       setMsg({ ok: true, text: 'Salvat.' });
       onSaved?.(s);
-      if (openPos) await shellApi.openPos();
+      // In the window „Casa de marcat” (compact) the POS is in the main
+      // window: show it and close this one, instead of leaving it on top.
+      if (openPos) await (compact ? shellApi.fiscalBack('pos') : shellApi.openPos());
     } catch (e) {
       setMsg({ ok: false, text: errText(e) });
     } finally {

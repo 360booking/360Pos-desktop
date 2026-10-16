@@ -19,6 +19,14 @@
 // register is monitored. Every change is also dispatched on `window` as
 // the CustomEvent 'desktop:fiscal-status' (detail = the same object or
 // null). Read-only: it never talks to the register itself.
+//
+// Butonul „Admin” (2026-10-16, patronul: „vreau un buton clar spre admin
+// din POS”): on the POS screens of the tenant site (/admin/restaurant/pos,
+// kds, jurnal) a button „Admin” sits bottom-left next to the status pill;
+// on the other admin pages the same place shows „Înapoi la POS”. „Admin”
+// only navigates to /admin — the web app itself shows the administrator
+// password screen (BlocareAdminPos, POST /api/auth/verify-admin-password)
+// before any admin page; nothing here skips it.
 (function () {
   'use strict';
   if (window.__POS_DESKTOP_BRIDGE__) return;
@@ -95,6 +103,7 @@
   //   Ctrl+Shift+F  fiscal settings window
   //   Ctrl+Shift+O  offline till
   //   Ctrl+Shift+K  kiosk (full screen) on/off
+  //   Ctrl+Shift+A  admin (web POS only; the admin password is asked first)
   //   F11           the same — the key everyone knows from browsers
   window.addEventListener('keydown', function (ev) {
     if (ev.key === 'F11' && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey) {
@@ -108,10 +117,30 @@
     if (k === 'f') run = bridge.openFiscalSettings;
     else if (k === 'o') run = bridge.openOfflineTill;
     else if (k === 'k') run = bridge.toggleKiosk;
+    else if (k === 'a' && isRemote) run = function () { goAdmin(); return Promise.resolve(); };
     if (!run) return;
     ev.preventDefault();
     run().catch(function (e) { console.warn('[desktop]', e); });
   }, true);
+
+  // Same list as CAI_LIBERE in the web app (lib/admin/blocarePosDesktop.ts).
+  var FREE_POS_PATHS = ['/admin/restaurant/pos', '/admin/restaurant/kds', '/admin/restaurant/jurnal'];
+  function cleanPath() {
+    return (location.pathname || '/').replace(/\/+$/, '') || '/';
+  }
+  function onPosScreen() {
+    var p = cleanPath();
+    return FREE_POS_PATHS.some(function (f) { return p === f || p.indexOf(f + '/') === 0; });
+  }
+  function onAdminPage() {
+    var p = cleanPath();
+    return (p === '/admin' || p.indexOf('/admin/') === 0) && !onPosScreen();
+  }
+  function goAdmin() {
+    // A normal navigation inside the tenant site: the web app asks for the
+    // administrator password (desktop admin lock) before showing anything.
+    location.assign(location.origin + '/admin');
+  }
 
   if (!isRemote) {
     // Local pages: the event only.
@@ -128,7 +157,7 @@
   // Status pill: offline → button to the offline till; un-synced or
   // to-review offline receipts → reminder. Shadow DOM so the web app's CSS
   // can't touch it (and vice versa).
-  var host = null, root = null, pill = null, lastHtml = '';
+  var host = null, root = null, pill = null, nav = null, lastHtml = '', lastNav = '';
   var offlineTicks = 0;
 
   function ensureHost() {
@@ -143,11 +172,31 @@
       'border-radius:999px;padding:8px 10px 8px 14px;box-shadow:0 6px 24px rgba(0,0,0,.35);color:#fff}' +
       '.off{background:#b42318}.warn{background:#b54708}.ok{background:#1d2939}' +
       'button{font:inherit;border:0;border-radius:999px;padding:6px 12px;cursor:pointer;background:#fff;color:#111}' +
-      '.hide{display:none}';
+      '.hide{display:none}' +
+      '.w{display:flex;gap:8px;align-items:flex-end}' +
+      '.n{pointer-events:auto;display:flex;gap:8px;align-items:center;font:700 15px/1.2 system-ui,Segoe UI,sans-serif;' +
+      'border:2px solid #fff;border-radius:999px;padding:10px 18px;min-height:44px;cursor:pointer;' +
+      'background:#0b5cad;color:#fff;box-shadow:0 6px 24px rgba(0,0,0,.35)}' +
+      '.n:hover{background:#0a4f95}.n:focus-visible{outline:3px solid #ffd54f;outline-offset:2px}' +
+      '.n svg{width:18px;height:18px}';
     root.appendChild(style);
+    var wrap = document.createElement('div');
+    wrap.className = 'w';
+    root.appendChild(wrap);
+    nav = document.createElement('button');
+    nav.type = 'button';
+    nav.className = 'n hide';
+    wrap.appendChild(nav);
     pill = document.createElement('div');
     pill.className = 'p hide';
-    root.appendChild(pill);
+    wrap.appendChild(pill);
+    nav.addEventListener('click', function () {
+      var a = nav.getAttribute('data-a');
+      if (a === 'admin') goAdmin();
+      if (a === 'pos') bridge.openPos().catch(function () {
+        location.assign(location.origin + FREE_POS_PATHS[0]);
+      });
+    });
     document.body.appendChild(host);
     pill.addEventListener('click', function (ev) {
       var a = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-a');
@@ -205,6 +254,30 @@
     pill.className = cls;
   }
 
+  var ICON_ADMIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>';
+  var ICON_BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>';
+
+  // „Admin” on the POS screens, „Înapoi la POS” on the other admin pages,
+  // nothing elsewhere (login, public pages). Checked often: the web app
+  // changes pages without reloading.
+  function renderNav() {
+    if (!ensureHost()) return;
+    var mode = onPosScreen() ? 'admin' : onAdminPage() ? 'pos' : '';
+    if (mode === lastNav) return;
+    lastNav = mode;
+    if (!mode) {
+      nav.className = 'n hide';
+      nav.removeAttribute('data-a');
+      return;
+    }
+    nav.setAttribute('data-a', mode);
+    nav.innerHTML = (mode === 'admin' ? ICON_ADMIN : ICON_BACK) + '<span></span>';
+    nav.lastChild.textContent = mode === 'admin' ? 'Admin' : 'Înapoi la POS';
+    nav.title = mode === 'admin' ? 'Intră în admin (cere parola administratorului)' : 'Înapoi la POS';
+    nav.className = 'n';
+  }
+  setInterval(renderNav, 600);
+
   function tick() {
     if (document.visibilityState === 'hidden') return;
     bridge.info().then(function (info) {
@@ -214,8 +287,9 @@
   }
   setInterval(tick, 5000);
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', tick, { once: true });
+    document.addEventListener('DOMContentLoaded', function () { tick(); renderNav(); }, { once: true });
   } else {
     setTimeout(tick, 500);
+    setTimeout(renderNav, 0);
   }
 })();

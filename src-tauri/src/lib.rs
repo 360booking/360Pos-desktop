@@ -240,6 +240,7 @@ pub fn run() {
             shell::shell_set_kiosk,
             shell::shell_fiscal_link_state,
             shell::shell_open_fiscal_link_page,
+            shell::shell_fiscal_back,
             shell::shell_quit,
             shell::agent::shell_fiscal_health,
             shell::agent::shell_fiscal_reconnect,

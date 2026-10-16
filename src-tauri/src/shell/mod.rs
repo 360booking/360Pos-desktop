@@ -250,6 +250,99 @@ fn navigate_main(app: &AppHandle, url: Url) -> Result<(), String> {
     Ok(())
 }
 
+/// Pages of the web POS that work without the administrator password
+/// (same list as `CAI_LIBERE` in the web app's lib/admin/blocarePosDesktop.ts).
+const FREE_POS_PATHS: [&str; 3] = ["/admin/restaurant/pos", "/admin/restaurant/kds", "/admin/restaurant/jurnal"];
+
+/// Where „Admin” / „Înapoi în admin” lands. The web app decides what each
+/// role sees there (managers go to their own first page) and — inside this
+/// app — asks for the administrator password first (BlocareAdminPos).
+pub const ADMIN_PATH: &str = "/admin";
+
+fn is_free_pos_path(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    FREE_POS_PATHS
+        .iter()
+        .any(|f| p == *f || p.starts_with(&format!("{f}/")))
+}
+
+/// An admin page (behind the password in this app), not one of the POS screens.
+fn is_admin_page(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    (p == ADMIN_PATH || p.starts_with("/admin/")) && !is_free_pos_path(p)
+}
+
+fn main_url(app: &AppHandle) -> Option<Url> {
+    main_window(app).and_then(|w| w.url().ok())
+}
+
+fn focus_main(app: &AppHandle) -> Result<(), String> {
+    let w = main_window(app).ok_or_else(|| "fereastra principală lipsește".to_string())?;
+    let _ = w.unminimize();
+    let _ = w.set_focus();
+    Ok(())
+}
+
+/// „Înapoi la POS” from the fiscal window: when the main window already
+/// shows the POS it is only brought to front (no reload, the open note stays
+/// on screen); without internet the offline till opens instead of an error.
+pub fn back_to_pos(app: &AppHandle) -> Result<(), String> {
+    let cfg = config::current();
+    if let Some(cur) = main_url(app) {
+        let on_pos = if cfg.is_web() {
+            cfg.tenant_origin()
+                .map(|t| same_origin(&cur, &t) && is_free_pos_path(cur.path()))
+                .unwrap_or(false)
+        } else {
+            same_origin(&cur, &local_base(app)) && cur.query().is_none()
+        };
+        if on_pos {
+            return focus_main(app);
+        }
+    }
+    if cfg.is_web() && cfg.pos_url().is_some() && !is_online() {
+        return open_offline_till(app);
+    }
+    open_pos(app)
+}
+
+/// „Admin” / „Înapoi în admin”: the main window opens the restaurant's admin
+/// on the tenant site. The web app shows the administrator password screen
+/// first (it is never skipped from here); if the main window is already on
+/// an admin page (e.g. Setări → Casa de marcat) it is only brought to front.
+pub fn open_admin(app: &AppHandle) -> Result<(), String> {
+    let cfg = config::current();
+    if !cfg.is_web() {
+        return Err("Adminul se deschide doar cu POS-ul web.".into());
+    }
+    let tenant = cfg
+        .tenant_origin()
+        .ok_or_else(|| "Adresa restaurantului nu e setată în aplicație.".to_string())?;
+    if let Some(cur) = main_url(app) {
+        if same_origin(&cur, &tenant) && is_admin_page(cur.path()) {
+            return focus_main(app);
+        }
+    }
+    let url = tenant.join(ADMIN_PATH).map_err(|e| e.to_string())?;
+    ensure_remote_capability(app, &cfg);
+    navigate_main(app, url)
+}
+
+/// Closes the window „Casa de marcat” (after a „Înapoi …” button).
+fn close_fiscal_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(FISCAL) {
+        let _ = w.close();
+    }
+}
+
+/// Lets the main window come in front of the fiscal window (which stays on
+/// top of a kiosk POS while it is the one in use).
+fn fiscal_window_behind(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(FISCAL) {
+        let _ = w.set_always_on_top(false);
+    }
+}
+
 pub fn open_pos(app: &AppHandle) -> Result<(), String> {
     let cfg = config::current();
     if !cfg.is_web() {
@@ -269,23 +362,34 @@ pub fn open_offline_till(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn open_fiscal_settings(app: &AppHandle) -> Result<(), String> {
+    let kiosk = KIOSK.load(Ordering::Relaxed);
     if let Some(w) = app.get_webview_window(FISCAL) {
         let _ = w.unminimize();
         let _ = w.show();
+        let _ = w.set_always_on_top(kiosk);
+        if kiosk {
+            let _ = w.set_fullscreen(true);
+        } else {
+            let _ = w.maximize();
+        }
         let _ = w.set_focus();
         return Ok(());
     }
-    let kiosk = KIOSK.load(Ordering::Relaxed);
+    // 2026-10-16 (patronul: „să se deschidă pe tot ecranul”): the window
+    // opens maximised — full screen over a kiosk POS — like the POS itself.
+    // Its „Înapoi la POS” / „Înapoi în admin” buttons close it again
+    // (shell_fiscal_back). The size below is only the "restore" size.
     WebviewWindowBuilder::new(app, FISCAL, WebviewUrl::External(local_view(app, Some("fiscal"))))
         .title("Casa de marcat")
-        // Fits a 1024x768 / 1366x768 POS screen (taskbar included); the
-        // guide scrolls inside the window when it needs more room.
         .inner_size(1000.0, 680.0)
-        .min_inner_size(800.0, 540.0)
+        .min_inner_size(800.0, 500.0)
         .center()
         .resizable(true)
+        .maximized(true)
+        .fullscreen(kiosk)
         // Over a fullscreen kiosk window it would otherwise open behind it.
         .always_on_top(kiosk)
+        .focused(true)
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -526,7 +630,27 @@ pub async fn shell_open_fiscal_link_page(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "Adresa restaurantului nu e setată în aplicație.".to_string())?;
     let url = link::auto_link_url(&tenant).ok_or_else(|| "adresă invalidă".to_string())?;
     ensure_remote_capability(&app, &cfg);
-    navigate_main(&app, url)
+    navigate_main(&app, url)?;
+    // The admin page (and, if needed, the password screen) must be visible,
+    // not hidden behind a full-screen fiscal window.
+    fiscal_window_behind(&app);
+    Ok(())
+}
+
+/// „Înapoi la POS” (`target = "pos"`) / „Înapoi în admin” (`"admin"`) in the
+/// window „Casa de marcat”: the main window shows the POS / the admin (with
+/// the administrator password, see `open_admin`) and the fiscal window
+/// closes. If the main window can't be switched the fiscal window stays open
+/// and the error is shown there.
+#[tauri::command]
+pub async fn shell_fiscal_back(app: AppHandle, target: String) -> Result<(), String> {
+    match target.as_str() {
+        "pos" => back_to_pos(&app)?,
+        "admin" => open_admin(&app)?,
+        _ => return Err("Destinație necunoscută.".into()),
+    }
+    close_fiscal_window(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -555,6 +679,20 @@ mod tests {
         assert!(!is_360booking_host(&Url::parse("https://evil360booking.ro/").unwrap()));
         assert!(!is_360booking_host(&Url::parse("http://pizza.360booking.ro/").unwrap()));
         assert!(!is_360booking_host(&Url::parse("https://360booking.ro.evil.com/").unwrap()));
+    }
+
+    #[test]
+    fn admin_vs_pos_paths() {
+        assert!(is_free_pos_path("/admin/restaurant/pos"));
+        assert!(is_free_pos_path("/admin/restaurant/pos/"));
+        assert!(is_free_pos_path("/admin/restaurant/kds/statia-1"));
+        assert!(!is_free_pos_path("/admin/restaurant/posx"));
+        assert!(is_admin_page("/admin"));
+        assert!(is_admin_page("/admin/restaurant/fiscal"));
+        assert!(is_admin_page("/admin/restaurant"));
+        assert!(!is_admin_page("/admin/restaurant/pos"));
+        assert!(!is_admin_page("/administrator"));
+        assert!(!is_admin_page("/auth/login"));
     }
 
     #[test]
