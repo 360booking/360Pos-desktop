@@ -17,6 +17,7 @@ import {
   type WaiterCall,
 } from '@/lib/api/restaurantAlerts';
 import { logger } from '@/lib/logger';
+import { useIntervalSondare, useSondareLaInterval } from '@/lib/sondare';
 
 const POLL_INTERVAL_MS = 8_000;
 const SOUND_INTERVAL_MS = 8_000;
@@ -133,8 +134,6 @@ export default function RestaurantAlertBanner() {
 
   useEffect(() => {
     void refresh();
-    const id = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
-    return () => window.clearInterval(id);
   }, [refresh]);
 
   const alerts = useMemo<Alert[]>(() => {
@@ -145,6 +144,12 @@ export default function RestaurantAlertBanner() {
     waiterCalls.forEach((c) => list.push({ kind: 'waiter', key: `waiter:${c.id}`, call: c }));
     return list;
   }, [pendingOrders, waiterCalls]);
+
+  // După programul localului (lib/sondare, 2026-10-17): 8 s în program sau cât e o
+  // alertă deschisă; noaptea, fără activitate, la 5 minute.
+  const intervalAlerte = useIntervalSondare(POLL_INTERVAL_MS, alerts.length > 0);
+  const sondeaza = useCallback(() => void refresh(), [refresh]);
+  useSondareLaInterval(sondeaza, intervalAlerte);
 
   const unhandled = useMemo(() => {
     return alerts.filter((a) => {
