@@ -26,11 +26,27 @@ export interface KitchenPrinterJob {
   ticketId: string | null;
   station: string | null;
   printerHost: string | null;
-  status: 'ok' | 'failed' | 'no_printer';
+  status: 'ok' | 'failed' | 'no_printer' | 'pending' | 'printing' | 'skipped';
   error: string | null;
   attempts: number;
   createdAt: string | null;
   acknowledgedAt: string | null;
+}
+
+/** Postul de bucătărie (backend: services/posturi_bucatarie.py). */
+export interface KitchenStation {
+  key: string;
+  name: string;
+  mode?: 'kds' | 'imprimanta' | 'ambele';
+}
+
+/** Postul unei imprimante: valorile vechi (kitchen / pizza) se citesc ca
+ *  Bucătărie / Pizzerie — ca pe server (`kitchen_printer.post_imprimanta`). */
+export function printerStationKey(v: string | null | undefined): string {
+  const k = String(v || '').trim().toLowerCase();
+  if (k === '' || k === 'kitchen') return 'bucatarie';
+  if (k === 'pizza') return 'pizzerie';
+  return k;
 }
 
 export interface JobsResponse {
@@ -56,6 +72,18 @@ export const kitchenPrintersApi = {
         '/api/restaurant/printers',
       );
       return res.data?.printers ?? [];
+    } catch (err) {
+      throw wrap(err);
+    }
+  },
+
+  /** Posturile restaurantului — stația imprimantei se alege din ele. */
+  stations: async (): Promise<KitchenStation[]> => {
+    try {
+      const res = await getApiClient().get<{ stations: KitchenStation[] }>(
+        '/api/restaurant/kitchen-stations',
+      );
+      return res.data?.stations ?? [];
     } catch (err) {
       throw wrap(err);
     }

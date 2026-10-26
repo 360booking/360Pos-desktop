@@ -46,6 +46,12 @@
     openPos: function () { return call('open_pos'); },
     toggleKiosk: function () { return call('toggle_kiosk'); },
     fiscal: fiscal,
+    // Bon de bucătărie (ESC/POS gata făcut de server) pe imprimanta postului
+    // din rețeaua locală (2026-10-26): { host, port, data: [octeți] }.
+    printKitchen: function (job) {
+      job = job || {};
+      return call('print_kitchen', { host: String(job.host || ''), port: Number(job.port) || 9100, data: job.data || [] });
+    },
   };
   try {
     Object.defineProperty(window, 'desktopBridge', { value: Object.freeze(bridge), configurable: false });

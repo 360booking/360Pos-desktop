@@ -23,6 +23,7 @@ fn main() {
         "open_pos",
         "toggle_kiosk",
         "fiscal_link",
+        "print_kitchen",
     ];
     let remote_safe = [
         "allow-bridge-info",
@@ -34,6 +35,8 @@ fn main() {
         "allow-open-fiscal-settings",
         "allow-open-pos",
         "allow-toggle-kiosk",
+        // Bonurile de bucătărie ale POS-ului web (2026-10-26).
+        "allow-print-kitchen",
     ]
     .iter()
     .map(|s| s.to_string())

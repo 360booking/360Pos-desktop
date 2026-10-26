@@ -8,7 +8,7 @@
  */
 import { initDb } from '@/lib/db';
 import { logger } from '@/lib/logger';
-import type { KitchenPrinter } from '@/lib/api/kitchenPrinters';
+import { printerStationKey, type KitchenPrinter } from '@/lib/api/kitchenPrinters';
 
 const KEY = 'kitchen_printers_cache';
 
@@ -48,9 +48,10 @@ export function pickPrinterForStation(
   station: string | null | undefined,
 ): KitchenPrinter | null {
   if (!printers || printers.length === 0) return null;
-  const target = (station || '').trim().toLowerCase();
+  // Cheile vechi (kitchen / pizza) = Bucătărie / Pizzerie, ca pe server.
+  const target = printerStationKey(station);
   for (const p of printers) {
-    if ((p.station || '').trim().toLowerCase() === target && p.enabled !== false) {
+    if (printerStationKey(p.station) === target && p.enabled !== false) {
       return p;
     }
   }

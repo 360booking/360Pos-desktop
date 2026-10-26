@@ -10,6 +10,10 @@
  * Config-ul rămâne tenant-wide (același JSONB pe `restaurants` ca în
  * web), dar îl cachezi local automat la fiecare GET ca să funcționeze
  * și offline (când backend-ul cade dar imprimanta tot e ok).
+ *
+ * 2026-10-26: postul imprimantei se alege din posturile de bucătărie
+ * (Bucătărie / Pizzerie / Bar / …), nu se mai scrie liber. Bonurile
+ * posturilor cu imprimantă le tipărește POS-ul deschis în această aplicație.
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -25,19 +29,20 @@ import {
 } from 'lucide-react';
 import {
   kitchenPrintersApi,
+  printerStationKey,
   type KitchenPrinter,
   type KitchenPrinterJob,
+  type KitchenStation,
 } from '@/lib/api/kitchenPrinters';
 import { writePrintersCache } from '@/lib/print/cache';
 import { testPrintLocal } from '@/lib/print/dispatch';
 
-const STATION_PRESETS = ['kitchen', 'bar', 'pizza', 'grill', 'reception'];
 const PAPER_OPTIONS: Array<32 | 42 | 48> = [32, 42, 48];
 
 function emptyPrinter(): KitchenPrinter {
   return {
     name: '',
-    station: 'kitchen',
+    station: 'bucatarie',
     host: '',
     port: 9100,
     paper_width_chars: 48,
@@ -49,7 +54,7 @@ function normalize(p: KitchenPrinter): KitchenPrinter {
   return {
     id: p.id,
     name: p.name || '',
-    station: (p.station || 'kitchen').toLowerCase(),
+    station: printerStationKey(p.station),
     host: p.host || '',
     port: Number(p.port || 9100),
     paper_width_chars: Number(p.paper_width_chars || 48),
@@ -66,6 +71,7 @@ export function KitchenPrintersTab() {
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<number, { ok: boolean; msg: string }>>({});
   const [showJobs, setShowJobs] = useState(false);
+  const [stations, setStations] = useState<KitchenStation[]>([{ key: 'bucatarie', name: 'Bucătărie' }]);
 
   const refresh = async () => {
     setLoading(true);
@@ -80,6 +86,10 @@ export function KitchenPrintersTab() {
       void writePrintersCache(cleaned);
       setJobs(jobsRes.jobs || []);
       setFailedUnack(jobsRes.failedUnacknowledged || 0);
+      kitchenPrintersApi
+        .stations()
+        .then((st) => { if (st.length) setStations(st); })
+        .catch(() => { /* rămâne Bucătăria */ });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Eroare la încărcare.');
     } finally {
@@ -142,7 +152,10 @@ export function KitchenPrintersTab() {
     setPrinters((arr) => arr.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
   };
 
-  const failedCount = useMemo(() => jobs.filter((j) => j.status !== 'ok').length, [jobs]);
+  const failedCount = useMemo(
+    () => jobs.filter((j) => j.status === 'failed' || j.status === 'no_printer').length,
+    [jobs],
+  );
 
   return (
     <div className="space-y-4">
@@ -152,8 +165,8 @@ export function KitchenPrintersTab() {
             <Printer className="h-4 w-4 text-violet-300" /> Imprimante de bucătărie
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            Backend printează automat la "Trimite la bucătărie". Dacă desktop-ul e offline,
-            printează direct de aici folosind config-ul cached.
+            Bonurile posturilor setate pe „Doar imprimantă” sau „Amândouă” le tipărește POS-ul
+            deschis în această aplicație, pe imprimanta postului.
           </p>
         </div>
         <button
@@ -228,20 +241,22 @@ export function KitchenPrintersTab() {
               </div>
               <div className="col-span-2">
                 <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">
-                  Stație
+                  Post
                 </label>
-                <input
-                  type="text"
-                  list="station-presets"
+                <select
                   value={p.station}
                   onChange={(e) => updateAt(idx, { station: e.target.value })}
                   className="w-full bg-slate-950/60 border border-white/10 rounded px-2 py-1.5 text-xs text-slate-100"
-                />
-                <datalist id="station-presets">
-                  {STATION_PRESETS.map((s) => (
-                    <option key={s} value={s} />
+                >
+                  {stations.map((st) => (
+                    <option key={st.key} value={st.key}>
+                      {st.name}
+                    </option>
                   ))}
-                </datalist>
+                  {!stations.some((st) => st.key === p.station) && (
+                    <option value={p.station}>{p.station} (post inexistent)</option>
+                  )}
+                </select>
               </div>
               <div className="col-span-3">
                 <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">
@@ -363,7 +378,7 @@ export function KitchenPrintersTab() {
               <thead className="bg-white/5 text-[10px] uppercase tracking-wider text-slate-500">
                 <tr>
                   <th className="px-2 py-1.5 text-left">Când</th>
-                  <th className="px-2 py-1.5 text-left">Stație</th>
+                  <th className="px-2 py-1.5 text-left">Post</th>
                   <th className="px-2 py-1.5 text-left">Imprimantă</th>
                   <th className="px-2 py-1.5 text-left">Status</th>
                   <th className="px-2 py-1.5 text-left">Detalii</th>
@@ -395,12 +410,12 @@ export function KitchenPrintersTab() {
                       {j.error || `${j.attempts} încercări`}
                     </td>
                     <td className="px-2 py-1.5 text-right">
-                      {j.status !== 'ok' && j.ticketId && (
+                      {(j.status === 'failed' || j.status === 'no_printer') && j.ticketId && (
                         <button
                           onClick={() => void retryJob(j.id)}
                           className="text-[10px] text-violet-300 hover:text-violet-200"
                         >
-                          Retry
+                          Retipărește
                         </button>
                       )}
                     </td>

@@ -9,7 +9,7 @@
 // `desktop:default` (remote web POS + local pages):
 //     bridge_info, offline_cache_orders, offline_pending_sync,
 //     offline_mark_synced, offline_journal, open_offline_till,
-//     open_fiscal_settings, open_pos, toggle_kiosk
+//     open_fiscal_settings, open_pos, toggle_kiosk, print_kitchen
 // local pages only (capabilities/default.json):
 //     offline_list_orders, offline_close_order, offline_mark_reviewed,
 //     offline_requeue, offline_resolve_unknown
@@ -28,6 +28,7 @@ use crate::fiscal::bridge_client::state::now_unix;
 use crate::fiscal::commands::{fiscal_bridge_claim, fiscal_bridge_run};
 use crate::fiscal::config as fiscal_config;
 use crate::fiscal::credentials;
+use crate::escpos::{self, EscposResult};
 use crate::fiscal::persist;
 use crate::fiscal::providers;
 use crate::fiscal::runtime_config;
@@ -164,6 +165,32 @@ async fn offline_close_order(app: AppHandle, request: CloseRequest) -> Result<Jo
     .await
 }
 
+/// Bonul de bucătărie al POS-ului web (2026-10-26): aplicația e stația de
+/// tipărire a restaurantului. Serverul face bonul (ESC/POS) și alege
+/// imprimanta postului; aici doar îl trimitem pe rețeaua locală, prin același
+/// `escpos_send` ca butonul de test. Pagina e remote, deci porturile sunt
+/// strict cele RAW de imprimantă (nu un scaner de porturi pentru oricine).
+#[tauri::command]
+async fn print_kitchen(host: String, port: u16, data: Vec<u8>) -> Result<EscposResult, String> {
+    let host = host.trim().to_string();
+    if host.is_empty() || host.len() > 253 {
+        return Err("Adresa imprimantei lipsește.".into());
+    }
+    if !(9100..=9109).contains(&port) {
+        return Err("Portul nu e de imprimantă (9100–9109).".into());
+    }
+    if data.is_empty() || data.len() > 256 * 1024 {
+        return Err("Bonul e gol sau prea mare.".into());
+    }
+    if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
+        let link_local = matches!(ip, std::net::IpAddr::V4(v4) if v4.is_link_local());
+        if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() || link_local {
+            return Err("Adresa nu poate fi a unei imprimante.".into());
+        }
+    }
+    Ok(escpos::escpos_send(host, port, data).await)
+}
+
 // Window work happens in async commands: creating a window from a sync
 // command deadlocks on Windows (wry#583).
 #[tauri::command]
@@ -297,6 +324,7 @@ pub fn init() -> TauriPlugin<Wry> {
             open_pos,
             toggle_kiosk,
             fiscal_link,
+            print_kitchen,
         ])
         .build()
 }
