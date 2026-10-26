@@ -49,6 +49,26 @@ export function printerStationKey(v: string | null | undefined): string {
   return k;
 }
 
+export type KitchenStationMode = NonNullable<KitchenStation['mode']>;
+
+/** Alegerea simplă „Cum ajung comenzile la bucătărie” (2026-10-26): modul
+ *  comun al tuturor posturilor sau „diferit” când posturile au moduri
+ *  diferite. Lipsa modului = „kds”, ca pe server. */
+export function modulBucatariei(
+  stations: readonly Pick<KitchenStation, 'mode'>[],
+): KitchenStationMode | 'diferit' {
+  const moduri = stations.map((s) => s.mode || 'kds');
+  if (moduri.length === 0) return 'kds';
+  return moduri.every((m) => m === moduri[0]) ? moduri[0] : 'diferit';
+}
+
+/** Etichetele și explicațiile — aceleași ca în admin. */
+export const MODURI_BUCATARIE: Array<{ v: KitchenStationMode; label: string; explicatie: string }> = [
+  { v: 'kds', label: 'Doar KDS', explicatie: 'Comanda apare pe ecranul bucătăriei.' },
+  { v: 'imprimanta', label: 'Doar imprimantă', explicatie: 'Se tipărește bonul la imprimanta postului.' },
+  { v: 'ambele', label: 'KDS și imprimantă', explicatie: 'Pe ecran și pe hârtie.' },
+];
+
 export interface JobsResponse {
   jobs: KitchenPrinterJob[];
   failedUnacknowledged: number;
@@ -77,7 +97,10 @@ export const kitchenPrintersApi = {
     }
   },
 
-  /** Posturile restaurantului — stația imprimantei se alege din ele. */
+  /** Posturile restaurantului — stația imprimantei se alege din ele.
+   *  Atenție: ruta cere token de personal; cu tokenul aplicației (pos_device)
+   *  serverul răspunde 401, deci apelantul trebuie să aibă o variantă de
+   *  rezervă. Modul posturilor se schimbă doar din admin. */
   stations: async (): Promise<KitchenStation[]> => {
     try {
       const res = await getApiClient().get<{ stations: KitchenStation[] }>(

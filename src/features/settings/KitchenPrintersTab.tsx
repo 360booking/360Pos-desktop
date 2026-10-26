@@ -14,6 +14,11 @@
  * 2026-10-26: postul imprimantei se alege din posturile de bucătărie
  * (Bucătărie / Pizzerie / Bar / …), nu se mai scrie liber. Bonurile
  * posturilor cu imprimantă le tipărește POS-ul deschis în această aplicație.
+ *
+ * Tot 2026-10-26: deasupra listei, „Cum ajung comenzile la bucătărie” (Doar
+ * KDS / Doar imprimantă / KDS și imprimantă) — doar afișat aici: ruta
+ * posturilor cere token de personal, iar aplicația are token pos_device.
+ * Se schimbă din admin: Restaurant → Setări → Posturi de bucătărie.
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -28,11 +33,14 @@ import {
   X,
 } from 'lucide-react';
 import {
+  MODURI_BUCATARIE,
   kitchenPrintersApi,
+  modulBucatariei,
   printerStationKey,
   type KitchenPrinter,
   type KitchenPrinterJob,
   type KitchenStation,
+  type KitchenStationMode,
 } from '@/lib/api/kitchenPrinters';
 import { writePrintersCache } from '@/lib/print/cache';
 import { testPrintLocal } from '@/lib/print/dispatch';
@@ -72,6 +80,8 @@ export function KitchenPrintersTab() {
   const [testResult, setTestResult] = useState<Record<number, { ok: boolean; msg: string }>>({});
   const [showJobs, setShowJobs] = useState(false);
   const [stations, setStations] = useState<KitchenStation[]>([{ key: 'bucatarie', name: 'Bucătărie' }]);
+  // null = nu s-a putut citi (ruta posturilor nu primește tokenul aplicației).
+  const [modBucatarie, setModBucatarie] = useState<KitchenStationMode | 'diferit' | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -88,8 +98,11 @@ export function KitchenPrintersTab() {
       setFailedUnack(jobsRes.failedUnacknowledged || 0);
       kitchenPrintersApi
         .stations()
-        .then((st) => { if (st.length) setStations(st); })
-        .catch(() => { /* rămâne Bucătăria */ });
+        .then((st) => {
+          if (st.length) setStations(st);
+          setModBucatarie(st.length ? modulBucatariei(st) : null);
+        })
+        .catch(() => { setModBucatarie(null); /* rămâne Bucătăria */ });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Eroare la încărcare.');
     } finally {
@@ -165,7 +178,7 @@ export function KitchenPrintersTab() {
             <Printer className="h-4 w-4 text-violet-300" /> Imprimante de bucătărie
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            Bonurile posturilor setate pe „Doar imprimantă” sau „Amândouă” le tipărește POS-ul
+            Bonurile posturilor setate pe „Doar imprimantă” sau „KDS și imprimantă” le tipărește POS-ul
             deschis în această aplicație, pe imprimanta postului.
           </p>
         </div>
@@ -199,6 +212,8 @@ export function KitchenPrintersTab() {
           </button>
         </div>
       )}
+
+      <ModBucatarie mod={modBucatarie} />
 
       <div className="rounded-lg border border-white/10 bg-slate-900/40">
         <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between">
@@ -425,6 +440,49 @@ export function KitchenPrintersTab() {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** „Cum ajung comenzile la bucătărie” — doar citire în aplicație. */
+function ModBucatarie({ mod }: { mod: KitchenStationMode | 'diferit' | null }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-slate-900/40 p-3 space-y-2">
+      <div className="text-xs uppercase tracking-wider text-slate-400">
+        Cum ajung comenzile la bucătărie
+      </div>
+      <div role="radiogroup" aria-label="Cum ajung comenzile la bucătărie" className="grid grid-cols-3 gap-2">
+        {MODURI_BUCATARIE.map((m) => {
+          const ales = mod === m.v;
+          return (
+            <div
+              key={m.v}
+              role="radio"
+              aria-checked={ales}
+              aria-disabled
+              className={`rounded border px-3 py-2 text-xs ${
+                ales
+                  ? 'border-violet-400/60 bg-violet-500/15 text-violet-100'
+                  : 'border-white/10 bg-white/5 text-slate-400'
+              }`}
+            >
+              <div className="font-medium text-slate-100 inline-flex items-center gap-1">
+                {ales && <Check className="h-3 w-3 text-violet-300" />} {m.label}
+              </div>
+              <div className="mt-0.5 text-[11px]">{m.explicatie}</div>
+            </div>
+          );
+        })}
+      </div>
+      {mod === 'diferit' && (
+        <div className="text-xs text-amber-200">Diferit pe fiecare post (se schimbă din admin).</div>
+      )}
+      {mod === null && (
+        <div className="text-xs text-slate-400">Modul ales nu se poate citi din aplicația POS.</div>
+      )}
+      <div className="text-[11px] text-slate-500">
+        Se schimbă din admin: Restaurant → Setări → Posturi de bucătărie.
       </div>
     </div>
   );
